@@ -1,0 +1,1150 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Puppet Tag FPS</title>
+<style>
+  body { margin: 0; background: #000; color: #888; font-family: monospace; text-align: center; }
+  canvas { background: #111; border: 2px solid #444; margin-top: 8px; }
+  p { margin: 6px; font-size: 12px; }
+</style>
+</head>
+<body>
+<canvas id="c" width="960" height="480"></canvas>
+<div id="onlinePanel" style="max-width:960px;margin:10px auto 18px;padding:10px;border:1px solid #34495e;background:#101923;color:#ddd;font:13px monospace;text-align:center">
+  <div style="font-size:15px;color:#f1c40f;margin-bottom:8px">ONLINE PLAY (BETA)</div>
+  <button id="createRoom">Create room</button>
+  <span style="padding:0 8px;color:#777">or</span>
+  <input id="roomCode" maxlength="6" placeholder="ROOM CODE" autocomplete="off" style="width:110px;text-transform:uppercase;text-align:center;font: bold 15px monospace;padding:5px;background:#080d13;color:#fff;border:1px solid #526579">
+  <button id="joinRoom">Join room</button>
+  <div id="netStatus" style="margin-top:8px;color:#9fb3c8">Local mode is unchanged. Create or join a room to play online.</div>
+  <div id="roomActions" style="margin-top:6px;display:none">Room code: <strong id="roomLabel" style="color:#2ecc71;letter-spacing:2px"></strong> — share this code with your opponent. <button id="leaveRoom">Leave room</button></div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<p>P1: W/S move, Q/E or mouse turn, A/D strafe, F dash, Space jump, Shift slide (hold), C grab pillar (hold)</p>
+<p>P2: Up/Down move, Left/Right turn, , / . strafe, Enter dash, / jump, ; slide (hold), ' grab (hold) &nbsp;|&nbsp; P pause, R reset (solo), Esc title</p>
+
+<script>
+/*
+  PUPPET TAG - first person, 2 player split screen or solo practice.
+  Plain ES5 on purpose, for old/limited browsers.
+
+    SIM     pure game logic. simStep(state, inputs, dt). No drawing, no keyboard,
+            no Math.random. State is plain data -> simSnapshot / simRestore.
+            An input is { b: key bitmask, t: turn delta in radians }.
+    INPUT   keyboard + mouse -> one small input object per player.
+    NET     stub. Net.getInputs() is where remote inputs/snapshots plug in later.
+    VIS     local-only visuals (springs, bob, particles). Not part of the state.
+    RENDER  raycaster + sprites, one view per player (or one full view in solo).
+
+  Movement verbs (always available, they stack):
+    dash   burst of speed, works in the air too, momentum carries on after it
+    jump   works anywhere, low air control but air-strafing can add speed
+    slide  hold: near-zero friction glide, tiny steering, speed boost on entry
+    grab   hold near a pillar: orbit it, W/S changes radius (speed), release to fling
+           in your facing direction (jump while grabbed = fling upward)
+*/
+var cv = document.getElementById('c');
+var ctx = cv.getContext('2d');
+var W = 960, H = 480, VW = 480, VH = 480, COLW = 2, NCOL = VW / COLW;
+var PI = Math.PI, R = 270, STEP = 1 / 60, DASH_CD = 1.3;
+var F0 = (VW / 2) / Math.tan(33 * PI / 180);   // 66 degree field of view
+var WALL_H = 100, SPRITE_H = 80;
+var COLS = [[52, 152, 219], [230, 126, 34]];
+var NAMES = ['P1', 'P2'];
+var TIMES = [20, 30, 45, 60], WINS = [1, 2, 3, 5];
+
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function hyp(x, y) { return Math.sqrt(x * x + y * y); }
+function setView(w, fovDeg) { VW = w; NCOL = w / COLW; F0 = (VW / 2) / Math.tan(fovDeg * PI / 360); }
+
+// =============================================================== SIM
+function srand(s) {
+  s.seed = (s.seed * 1664525 + 1013904223) >>> 0;
+  return s.seed / 4294967296;
+}
+function mkP() {
+  return { x: 0, z: 0, y: 0, vx: 0, vz: 0, vy: 0, gy: 0, a: 0, dashT: 0, dashCd: 0, dashX: 1, dashZ: 0,
+           stun: 0, stunMax: 1, stunDir: 1, isIt: false, score: 0,
+           sl: false, grab: -1, gAng: 0, gR: 0, gL: 0, gcd: 0, coast: 0, jbuf: 0 };
+}
+function simNew() {
+  return { mode: 'title', mt: 0, cfg: { time: 30, wins: 3, pillars: true, solo: false, mouse: true },
+           round: 1, timeLeft: 30, tagCd: 0, lastCount: 4, lastSec: 99, seed: 12345,
+           winner: -1, p: [mkP(), mkP()], pillars: [], ev: [] };
+}
+function simSnapshot(s) {
+  var c = JSON.parse(JSON.stringify(s));
+  c.ev = [];
+  return JSON.stringify(c);
+}
+function simRestore(s, str) {
+  var o = JSON.parse(str), k;
+  for (k in o) s[k] = o[k];
+  s.ev = [];
+}
+function setStun(p, d, dir) { p.stun = d; p.stunMax = d; p.stunDir = dir; }
+
+function simPillars(s) {
+  s.pillars = [];
+  if (s.cfg.pillars) {
+    s.pillars.push({ x: -85, z: -75, r: 20, h: 40 });
+    s.pillars.push({ x: 85, z: 75, r: 20, h: 40 });
+    s.pillars.push({ x: -85, z: 75, r: 20, h: 40 });
+    s.pillars.push({ x: 85, z: -75, r: 20, h: 40 });
+  }
+}
+function simResetPlayers(s) {
+  var i, p;
+  for (i = 0; i < 2; i++) {
+    p = s.p[i];
+    p.x = i == 0 ? -170 : 170; p.z = 0; p.y = 0; p.gy = 0;
+    p.a = i == 0 ? 0 : PI;
+    p.vx = p.vz = p.vy = 0; p.dashT = 0; p.dashCd = 0; p.stun = 0; p.isIt = false;
+    p.sl = false; p.grab = -1; p.gcd = 0; p.coast = 0; p.jbuf = 0;
+  }
+}
+function simStartRound(s) {
+  simResetPlayers(s);
+  simPillars(s);
+  // solo practice: the idle dummy (P2) starts as IT, no clock, no countdown
+  s.p[s.cfg.solo ? 1 : (srand(s) < 0.5 ? 0 : 1)].isIt = true;
+  s.timeLeft = s.cfg.time; s.tagCd = 0.5;
+  s.mode = s.cfg.solo ? 'play' : 'countdown'; s.mt = s.cfg.solo ? 1 : 0;
+  s.lastCount = 4; s.lastSec = 99;
+}
+function simStartMatch(s) {
+  s.p[0].score = 0; s.p[1].score = 0; s.round = 1; s.winner = -1;
+  simStartRound(s);
+}
+function simToTitle(s) {
+  s.mode = 'title'; s.mt = 0;
+  simResetPlayers(s); simPillars(s);
+}
+
+function tryDash(s, i, fw, st) {
+  var p = s.p[i];
+  if (p.dashCd > 0 || p.stun > 0 || p.grab >= 0) return;
+  var ca = Math.cos(p.a), sa = Math.sin(p.a);
+  var dx = ca * fw - sa * st, dz = sa * fw + ca * st, l = hyp(dx, dz);
+  if (l < 0.01) { dx = ca; dz = sa; } else { dx /= l; dz /= l; }
+  p.dashX = dx; p.dashZ = dz; p.dashT = 0.2; p.dashCd = DASH_CD;
+  s.ev.push({ t: 'dash', i: i, x: p.x, z: p.z });
+}
+
+// height of the surface under a player (0 = floor, or the top of a pillar they are above)
+function support(s, p) {
+  var j, pl, gl = 0;
+  for (j = 0; j < s.pillars.length; j++) {
+    pl = s.pillars[j];
+    if (hyp(p.x - pl.x, p.z - pl.z) < pl.r + 8 && p.y >= pl.h - 6 && pl.h > gl) gl = pl.h;
+  }
+  return gl;
+}
+
+function stepP(s, i, bits, tdel, dt) {
+  var p = s.p[i], fw = 0, st = 0, tn = 0, j, pl, l, f, k;
+  var wantSlide = false, wantGrab = false;
+  if (p.stun > 0) p.stun -= dt;
+  var can = s.mode == 'play' && p.stun <= 0;
+  if (can) {
+    if (bits & 1) fw += 1;
+    if (bits & 2) fw -= 1;
+    if (bits & 16) st -= 1;
+    if (bits & 32) st += 1;
+    if (bits & 4) tn -= 1;
+    if (bits & 8) tn += 1;
+    if (bits & 64) tryDash(s, i, fw, st);
+    if (bits & 128) p.jbuf = 0.12;
+    wantSlide = (bits & 256) != 0;
+    wantGrab = (bits & 512) != 0;
+  }
+  if (p.jbuf > 0) p.jbuf -= dt;
+  if (p.gcd > 0) p.gcd -= dt;
+  if (tn) p.a += tn * 2.6 * dt;
+  if (can && tdel) p.a += tdel;
+  var ca = Math.cos(p.a), sa = Math.sin(p.a);
+  var speed = 150 * (p.isIt ? 1.12 : 1);
+  var grounded = p.y <= p.gy + 0.01 && p.vy <= 0;
+
+  // release the pillar: fling along the facing direction (jump = fling upward)
+  if (p.grab >= 0 && (!wantGrab || p.stun > 0 || p.jbuf > 0)) {
+    if (can) {
+      var sp2 = clamp(hyp(p.vx, p.vz) + 140, 200, 650);
+      p.vx = ca * sp2; p.vz = sa * sp2;
+      if (p.jbuf > 0) { p.vy = 300; p.jbuf = 0; }
+      s.ev.push({ t: 'fling', x: p.x, z: p.z, y: p.y + 30 });
+    }
+    p.grab = -1; p.coast = 0.3; p.gcd = 0.3;
+    if (p.vy > 0) grounded = false;
+  }
+  // grab a pillar that is within reach
+  if (p.grab < 0 && wantGrab && p.dashT <= 0 && p.gcd <= 0) {
+    var bj = -1, bd = 1e9, dd;
+    for (j = 0; j < s.pillars.length; j++) {
+      pl = s.pillars[j];
+      if (p.y > pl.h + 20) continue;
+      dd = hyp(p.x - pl.x, p.z - pl.z);
+      if (dd < pl.r + 46 && dd < bd) { bd = dd; bj = j; }
+    }
+    if (bj >= 0) {
+      pl = s.pillars[bj];
+      var rx = p.x - pl.x, rz = p.z - pl.z, r0 = Math.max(bd, pl.r + 16);
+      var vt = (-rz * p.vx + rx * p.vz) / (bd || 1);
+      if (Math.abs(vt) < 60) vt = (vt < 0 ? -60 : 60);
+      p.grab = bj; p.gAng = Math.atan2(rz, rx); p.gR = r0; p.gL = vt * r0;
+      p.dashT = 0; p.vy = 0;
+      s.ev.push({ t: 'grab', x: p.x, z: p.z });
+    }
+  }
+
+  if (p.grab >= 0) {
+    // orbit: angular momentum is kept, so a smaller radius = faster spin. W pulls in, S pushes out
+    pl = s.pillars[p.grab];
+    var mn = pl.r + 16;
+    p.gR = clamp(p.gR - (fw * 70 + 14) * dt, mn, mn + 46);
+    p.gL = clamp(p.gL, -650 * p.gR, 650 * p.gR);
+    p.gAng += (p.gL / (p.gR * p.gR)) * dt;
+    var vt2 = p.gL / p.gR;
+    p.x = pl.x + Math.cos(p.gAng) * p.gR; p.z = pl.z + Math.sin(p.gAng) * p.gR;
+    p.vx = -Math.sin(p.gAng) * vt2; p.vz = Math.cos(p.gAng) * vt2;
+    p.vy = 0; p.sl = false; p.dashT = 0;
+  } else {
+    if (p.jbuf > 0 && grounded && can) {
+      p.vy = 340; p.jbuf = 0; grounded = false;
+      s.ev.push({ t: 'jump', x: p.x, z: p.z });
+    }
+    var sliding = grounded && wantSlide && p.dashT <= 0;
+    if (sliding && !p.sl) {
+      var sp0 = hyp(p.vx, p.vz);
+      if (sp0 > 60) {
+        var bs = Math.min(1.2, 460 / sp0);
+        if (bs > 1) { p.vx *= bs; p.vz *= bs; }
+        s.ev.push({ t: 'slide', x: p.x, z: p.z });
+      }
+    }
+    p.sl = sliding;
+
+    if (p.dashT > 0) {
+      p.dashT -= dt;
+      p.vx = p.dashX * 460; p.vz = p.dashZ * 460;
+      if (p.dashT <= 0) p.coast = 0.35;
+    } else if (p.stun > 0) {
+      f = Math.pow(0.02, dt);
+      p.vx *= f; p.vz *= f;
+    } else {
+      var fwk = fw < 0 ? fw * 0.7 : fw;
+      var wx = ca * fwk - sa * st * 0.85, wz = sa * fwk + ca * st * 0.85;
+      l = hyp(wx, wz);
+      if (l > 1) { wx /= l; wz /= l; l = 1; }
+      if (!grounded) {
+        // air: no friction, you can only add speed toward where you steer (air-strafing)
+        if (l > 0.01) {
+          var ux = wx / l, uz = wz / l, add = 50 - (p.vx * ux + p.vz * uz);
+          if (add > 0) { add = Math.min(add, 900 * dt); p.vx += ux * add; p.vz += uz * add; }
+        }
+      } else if (p.sl) {
+        p.vx += wx * 90 * dt; p.vz += wz * 90 * dt;
+        f = Math.pow(0.55, dt); p.vx *= f; p.vz *= f;
+      } else {
+        k = Math.min(1, dt * (p.coast > 0 ? 1.2 : 9));
+        p.vx += (wx * speed - p.vx) * k;
+        p.vz += (wz * speed - p.vz) * k;
+      }
+    }
+    if (p.coast > 0) p.coast -= dt;
+    var tot = hyp(p.vx, p.vz);
+    if (tot > 620 && p.dashT <= 0) { p.vx *= 620 / tot; p.vz *= 620 / tot; }
+    if (p.dashCd > 0) p.dashCd -= dt;
+    p.x += p.vx * dt; p.z += p.vz * dt;
+  }
+  if (p.grab >= 0 && p.dashCd > 0) p.dashCd -= dt;
+
+  var d = hyp(p.x, p.z), lim = R - 14;
+  if (d > lim) {
+    var nx = p.x / d, nz = p.z / d, dot = p.vx * nx + p.vz * nz;
+    p.x = nx * lim; p.z = nz * lim;
+    if (dot > 0) { p.vx -= 1.5 * dot * nx; p.vz -= 1.5 * dot * nz; }
+  }
+  var pdx, pdz, pdd, pmn;
+  for (j = 0; j < s.pillars.length; j++) {
+    pl = s.pillars[j];
+    if (j == p.grab || p.y > pl.h - 5) continue;
+    pdx = p.x - pl.x; pdz = p.z - pl.z; pdd = hyp(pdx, pdz); pmn = pl.r + 14;
+    if (pdd < pmn && pdd > 0.001) {
+      var qx = pdx / pdd, qz = pdz / pdd, dv = p.vx * qx + p.vz * qz;
+      p.x = pl.x + qx * pmn; p.z = pl.z + qz * pmn;
+      if (dv < 0) { p.vx -= 1.4 * dv * qx; p.vz -= 1.4 * dv * qz; }
+    }
+  }
+
+  // vertical: gravity, floor, pillar tops
+  var gl = support(s, p), wasAir = !grounded, iv = p.vy;
+  if (p.grab < 0) { p.vy -= (p.dashT > 0 ? 250 : 900) * dt; p.y += p.vy * dt; }
+  if (p.y <= gl) {
+    if (p.vy < 0) p.vy = 0;
+    p.y = gl;
+    if (wasAir && iv < -40) { p.coast = 0.15; s.ev.push({ t: 'land', x: p.x, z: p.z, v: -iv }); }
+  }
+  p.gy = gl;
+}
+
+function doTag(s, ii, oi) {
+  var it = s.p[ii], other = s.p[oi];
+  it.isIt = false; other.isIt = true;
+  s.tagCd = 1.4;
+  var dx = other.x - it.x, dz = other.z - it.z, d = hyp(dx, dz) || 1;
+  var nx = dx / d, nz = dz / d;
+  other.vx = nx * 380; other.vz = nz * 380;
+  it.vx = -nx * 220; it.vz = -nz * 220;
+  it.dashT = 0; other.dashT = 0;
+  setStun(other, 0.6, nx > 0 ? 1 : -1);
+  s.ev.push({ t: 'tag', a: ii, b: oi, x: (it.x + other.x) / 2, z: (it.z + other.z) / 2 });
+}
+function doShove(s, ri, ii) {
+  var runner = s.p[ri], it = s.p[ii];
+  var dx = it.x - runner.x, dz = it.z - runner.z, d = hyp(dx, dz) || 1;
+  var nx = dx / d, nz = dz / d;
+  it.vx = nx * 420; it.vz = nz * 420;
+  runner.vx = -nx * 160; runner.vz = -nz * 160;
+  runner.dashT = 0; it.dashT = 0;
+  setStun(it, 0.5, nx > 0 ? 1 : -1);
+  s.ev.push({ t: 'shove', a: ri, b: ii, x: (it.x + runner.x) / 2, z: (it.z + runner.z) / 2 });
+}
+function collide(s) {
+  // clearly above/below each other (jumping over): no contact, no tag
+  if (Math.abs(s.p[0].y - s.p[1].y) > 40) return;
+  var a = s.p[0], b = s.p[1];
+  var dx = b.x - a.x, dz = b.z - a.z, d = hyp(dx, dz);
+  if (d < 28 && d > 0.001) {
+    var nx = dx / d, nz = dz / d, ov = (28 - d) / 2;
+    a.x -= nx * ov; a.z -= nz * ov; b.x += nx * ov; b.z += nz * ov;
+    if (s.tagCd <= 0) {
+      var ii = a.isIt ? 0 : 1, oi = 1 - ii;
+      if (s.p[oi].dashT > 0 && s.p[oi].stun <= 0) doShove(s, oi, ii);
+      else if (s.p[ii].stun <= 0) doTag(s, ii, oi);
+    }
+  }
+}
+function endRound(s) {
+  var loser = s.p[0].isIt ? 0 : 1, winner = 1 - loser;
+  s.winner = winner;
+  s.p[winner].score++;
+  setStun(s.p[loser], 2.2, 1);
+  s.mode = 'roundend'; s.mt = 0;
+  s.ev.push({ t: 'roundend', w: winner });
+}
+
+function simStep(s, inp, dt) {
+  if (s.mode == 'title') return;
+  s.mt += dt;
+  var i, solo = s.cfg.solo;
+  for (i = 0; i < 2; i++) stepP(s, i, inp[i].b, inp[i].t, dt);
+  if (s.mode == 'countdown') {
+    var n = Math.ceil(3 - s.mt);
+    if (s.mt >= 3) { s.mode = 'play'; s.mt = 0; s.ev.push({ t: 'go' }); }
+    else if (n != s.lastCount) { s.lastCount = n; s.ev.push({ t: 'count' }); }
+  } else if (s.mode == 'play') {
+    s.tagCd -= dt;
+    collide(s);
+    if (!solo) {
+      s.timeLeft -= dt;
+      var sec = Math.ceil(s.timeLeft);
+      if (sec <= 5 && sec != s.lastSec && sec > 0) { s.lastSec = sec; s.ev.push({ t: 'tick' }); }
+      if (s.timeLeft <= 0) { s.timeLeft = 0; endRound(s); }
+    }
+  } else if (s.mode == 'roundend') {
+    if (s.mt > 3) {
+      if (s.p[s.winner].score >= s.cfg.wins) { s.mode = 'matchend'; s.mt = 0; s.ev.push({ t: 'matchend' }); }
+      else { s.round++; simStartRound(s); }
+    }
+  }
+}
+
+// =============================================================== INPUT
+// bits: 1 fwd, 2 back, 4 turn L, 8 turn R, 16 strafe L, 32 strafe R, 64 dash, 128 jump, 256 slide, 512 grab
+var MAPS = [
+  { f: 87, b: 83, l: 81, r: 69, sl: 65, sr: 68, act: [70], jump: [32], slide: 16, grab: 67 },
+  { f: 38, b: 40, l: 37, r: 39, sl: 188, sr: 190, act: [13], jump: [191], slide: 186, grab: 222 }
+];
+var Input = { keys: {}, dashQ: [false, false], jumpQ: [false, false], mx: 0, locked: false, drag: false, lx: 0 };
+function readBits(i) {
+  var k = Input.keys, m = MAPS[i], b = 0;
+  if (k[m.f]) b |= 1;
+  if (k[m.b]) b |= 2;
+  if (k[m.l]) b |= 4;
+  if (k[m.r]) b |= 8;
+  if (k[m.sl]) b |= 16;
+  if (k[m.sr]) b |= 32;
+  if (k[m.slide]) b |= 256;
+  if (k[m.grab]) b |= 512;
+  if (Input.dashQ[i]) { b |= 64; Input.dashQ[i] = false; }
+  if (Input.jumpQ[i]) { b |= 128; Input.jumpQ[i] = false; }
+  return b;
+}
+function readIn(i) {
+  var t = 0;
+  if (i == 0 && sim.cfg.mouse) { t = clamp(Input.mx * 0.005, -1.2, 1.2); Input.mx = 0; }
+  return { b: readBits(i), t: t };
+}
+
+// =============================================================== NET (stub)
+// Later: in 'host' mode, getInputs returns [local input, remote input] and the host
+// sends simSnapshot() to the client. In 'client' mode, send local input to the host
+// and simRestore() the snapshots that come back.
+var Net = {
+  mode: 'local', role: 'local', channel: null, room: '', remoteInput: { b: 0, t: 0 },
+  lastSend: 0, ticks: 0, status: 'Local mode',
+  interpFrom: null, interpTo: null, interpAt: 0,
+  getInputs: function (s) {
+    if (this.mode == 'host') return [readIn(0), this.remoteInput];
+    return [readIn(0), s.cfg.solo ? { b: 0, t: 0 } : readIn(1)];
+  }
+};
+
+// =============================================================== ONLINE PLAY
+// Supabase Realtime Broadcast carries room messages. The host owns the simulation;
+// the joining player sends inputs and renders the host's authoritative snapshots.
+var SUPABASE_URL = 'https://xkzltynwpbxhdopllhzq.supabase.co';
+var SUPABASE_KEY = 'sb_publishable_WK6_gMdV6DN7OQkKpZSwkQ_N4NMfpOp';
+var sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+var netStatusEl = document.getElementById('netStatus');
+function netStatus(t) { Net.status = t; if (netStatusEl) netStatusEl.textContent = t; }
+function setRoomUI(code) {
+  document.getElementById('roomActions').style.display = code ? 'block' : 'none';
+  document.getElementById('roomLabel').textContent = code || '';
+}
+function makeRoomCode() {
+  var chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789', out = '', i;
+  for (i = 0; i < 6; i++) out += chars.charAt(Math.floor(Math.random() * chars.length));
+  return out;
+}
+function leaveOnline() {
+  if (Net.channel) { try { sb.removeChannel(Net.channel); } catch (e) {} }
+  Net.channel = null; Net.mode = 'local'; Net.role = 'local'; Net.room = '';
+  Net.remoteInput = { b: 0, t: 0 }; Net.ticks = 0; Net.lastSend = 0;
+  Net.interpFrom = null; Net.interpTo = null; Net.interpAt = 0;
+  setRoomUI(''); netStatus('Local mode is unchanged. Create or join a room to play online.');
+  simToTitle(sim);
+}
+function openOnlineRoom(code, role) {
+  if (Net.channel) leaveOnline();
+  simToTitle(sim);
+  code = String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (code.length !== 6) { netStatus('Enter a 6-character room code.'); return; }
+  Net.mode = role; Net.role = role; Net.room = code;
+  Net.remoteInput = { b: 0, t: 0 }; Net.ticks = 0;
+  Net.interpFrom = null; Net.interpTo = null; Net.interpAt = 0;
+  setRoomUI(code); netStatus('Connecting to room ' + code + '...');
+  var ch = sb.channel('puppet-tag-' + code, { config: { broadcast: { self: false } } });
+  Net.channel = ch;
+  ch.on('broadcast', { event: 'input' }, function (msg) {
+    if (Net.mode == 'host' && msg.payload && msg.payload.input) Net.remoteInput = msg.payload.input;
+  });
+  ch.on('broadcast', { event: 'state' }, function (msg) {
+    if (Net.mode == 'client' && msg.payload && msg.payload.state) {
+      try {
+        var incoming = JSON.parse(msg.payload.state);
+        if (Net.interpTo && incoming.p && incoming.p.length >= 2) {
+          Net.interpFrom = [
+            { x: Net.interpTo[0].x, z: Net.interpTo[0].z, y: Net.interpTo[0].y, a: Net.interpTo[0].a },
+            { x: Net.interpTo[1].x, z: Net.interpTo[1].z, y: Net.interpTo[1].y, a: Net.interpTo[1].a }
+          ];
+        } else if (incoming.p && incoming.p.length >= 2) {
+          Net.interpFrom = [
+            { x: incoming.p[0].x, z: incoming.p[0].z, y: incoming.p[0].y, a: incoming.p[0].a },
+            { x: incoming.p[1].x, z: incoming.p[1].z, y: incoming.p[1].y, a: incoming.p[1].a }
+          ];
+        }
+        if (incoming.p && incoming.p.length >= 2) {
+          Net.interpTo = [
+            { x: incoming.p[0].x, z: incoming.p[0].z, y: incoming.p[0].y, a: incoming.p[0].a },
+            { x: incoming.p[1].x, z: incoming.p[1].z, y: incoming.p[1].y, a: incoming.p[1].a }
+          ];
+          Net.interpAt = new Date().getTime();
+        }
+        simRestore(sim, msg.payload.state);
+      } catch (e) { netStatus('Received an invalid game update.'); }
+    }
+  });
+  ch.on('broadcast', { event: 'hello' }, function () {
+    if (Net.mode == 'host') netStatus('Opponent connected. Press SPACE to start the match.');
+  });
+  ch.on('broadcast', { event: 'bye' }, function () {
+    if (Net.mode == 'host') { Net.remoteInput = { b: 0, t: 0 }; netStatus('Opponent disconnected. Waiting for someone to rejoin...'); }
+  });
+  ch.subscribe(function (status) {
+    if (status === 'SUBSCRIBED') {
+      if (role == 'host') netStatus('Room ready. Share the code above; waiting for opponent...');
+      else { netStatus('Joined room. Waiting for host to start. Use W/S, A/D, Q/E, F, SPACE and SHIFT to play.'); ch.send({ type: 'broadcast', event: 'hello', payload: { role: 'client' } }); }
+    } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+      netStatus('Connection issue (' + status + '). Try leaving and joining again.');
+    }
+  });
+}
+document.getElementById('createRoom').onclick = function () { openOnlineRoom(makeRoomCode(), 'host'); };
+document.getElementById('joinRoom').onclick = function () { openOnlineRoom(document.getElementById('roomCode').value, 'client'); };
+document.getElementById('leaveRoom').onclick = leaveOnline;
+document.getElementById('roomCode').onkeydown = function (e) { if ((e.key || '') == 'Enter') document.getElementById('joinRoom').click(); };
+window.addEventListener('beforeunload', function () {
+  if (Net.channel) Net.channel.send({ type: 'broadcast', event: 'bye', payload: {} });
+});
+
+// =============================================================== VIS (local only)
+var vis = [], parts = [], shake = 0, clock = 0, msg = { txt: '', col: '#fff', t: 99 };
+function mkVis() {
+  return { lvx: 0, lvz: 0, phase: 0, moving: 0, kick: 0, flash: 0,
+           hf: 0, hfv: 0, hl: 0, hlv: 0, df: 0, dfv: 0, dl: 0, dlv: 0, cr: 0 };
+}
+vis.push(mkVis()); vis.push(mkVis());
+
+function updateVis(dt) {
+  if (dt < 0.001) return;
+  var i, p, v, ax, az, af, al, ca, sa, spd;
+  for (i = 0; i < 2; i++) {
+    p = sim.p[i]; v = vis[i];
+    ca = Math.cos(p.a); sa = Math.sin(p.a);
+    ax = (p.vx - v.lvx) / dt; az = (p.vz - v.lvz) / dt;
+    v.lvx = p.vx; v.lvz = p.vz;
+    af = clamp(ax * ca + az * sa, -3000, 3000);
+    al = clamp(-ax * sa + az * ca, -3000, 3000);
+    v.hfv += (-130 * v.hf - 9 * v.hfv - af * 0.9) * dt;
+    v.hlv += (-130 * v.hl - 9 * v.hlv - al * 0.9) * dt;
+    v.hf = clamp(v.hf + v.hfv * dt, -18, 18);
+    v.hl = clamp(v.hl + v.hlv * dt, -18, 18);
+    v.dfv += (-220 * v.df - 14 * v.dfv - af * 0.4) * dt;
+    v.dlv += (-220 * v.dl - 14 * v.dlv - al * 0.5) * dt;
+    v.df = clamp(v.df + v.dfv * dt, -6, 6);
+    v.dl = clamp(v.dl + v.dlv * dt, -8, 8);
+    spd = hyp(p.vx, p.vz);
+    v.phase += spd * dt * 0.075;
+    v.moving = Math.min(1, spd / 150);
+    if (p.dashT > 0) v.kick = 1; else v.kick = Math.max(0, v.kick - dt * 3);
+    v.flash = Math.max(0, v.flash - dt * 2.5);
+    v.cr += ((p.sl ? 1 : 0) - v.cr) * Math.min(1, dt * 12);
+  }
+  clock += dt;
+  msg.t += dt;
+  if (shake > 0) { shake -= dt * 40; if (shake < 0) shake = 0; }
+}
+
+function burst3(x, z, y, n, col, spd, life, size) {
+  var i, a, s;
+  for (i = 0; i < n; i++) {
+    a = Math.random() * PI * 2; s = Math.random() * spd;
+    parts.push({ x: x, z: z, y: y, vx: Math.cos(a) * s, vz: Math.sin(a) * s,
+                 vy: Math.random() * spd * 0.8, life: life * (0.5 + Math.random() * 0.5),
+                 max: life, col: col, size: size });
+  }
+}
+function updateParts(dt) {
+  var i, p;
+  for (i = parts.length - 1; i >= 0; i--) {
+    p = parts[i];
+    p.x += p.vx * dt; p.z += p.vz * dt; p.y += p.vy * dt;
+    p.vy -= 500 * dt;
+    if (p.y < 0) { p.y = 0; p.vy = -p.vy * 0.4; }
+    p.life -= dt;
+    if (p.life <= 0) parts.splice(i, 1);
+  }
+}
+
+// audio
+var ac = null;
+function beep(f, d, type, vol) {
+  try {
+    if (!ac) {
+      var C = window.AudioContext || window.webkitAudioContext;
+      if (!C) return;
+      ac = new C();
+    }
+    var o = ac.createOscillator(), g = ac.createGain();
+    o.type = type || 'square';
+    o.frequency.value = f;
+    g.gain.setValueAtTime(vol || 0.05, ac.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + d);
+    o.connect(g); g.connect(ac.destination);
+    o.start(); o.stop(ac.currentTime + d);
+  } catch (e) {}
+}
+function setMsg(t, c) { msg.txt = t; msg.col = c; msg.t = 0; }
+
+function handleEvents() {
+  var i, e;
+  for (i = 0; i < sim.ev.length; i++) {
+    e = sim.ev[i];
+    if (e.t == 'dash') {
+      burst3(e.x, e.z, 4, 8, 'rgb(200,200,200)', 90, 0.4, 3);
+      beep(300, 0.1, 'sawtooth', 0.04);
+    } else if (e.t == 'tag') {
+      burst3(e.x, e.z, 40, 26, 'rgb(255,80,80)', 220, 0.7, 5);
+      burst3(e.x, e.z, 40, 12, 'rgb(255,230,120)', 180, 0.6, 4);
+      vis[e.b].flash = 1; shake = 10;
+      setMsg('TAG!', '#ff5252');
+      beep(180, 0.25, 'square', 0.07); beep(90, 0.3, 'sawtooth', 0.06);
+    } else if (e.t == 'shove') {
+      burst3(e.x, e.z, 40, 16, 'rgb(255,255,255)', 180, 0.5, 4);
+      shake = 7; setMsg('BONK!', '#f1c40f');
+      beep(240, 0.15, 'triangle', 0.08);
+    } else if (e.t == 'jump') {
+      burst3(e.x, e.z, 2, 5, 'rgb(190,190,190)', 60, 0.3, 3); beep(420, 0.08, 'triangle', 0.04);
+    } else if (e.t == 'land') {
+      burst3(e.x, e.z, 2, 6, 'rgb(190,190,190)', 70, 0.3, 3);
+      if (e.v > 300) shake = 4;
+      beep(120, 0.06, 'triangle', 0.04);
+    } else if (e.t == 'slide') {
+      burst3(e.x, e.z, 2, 8, 'rgb(200,200,200)', 80, 0.4, 3); beep(200, 0.15, 'sawtooth', 0.03);
+    } else if (e.t == 'grab') {
+      beep(520, 0.07, 'square', 0.04);
+    } else if (e.t == 'fling') {
+      burst3(e.x, e.z, e.y, 10, 'rgb(120,220,255)', 160, 0.4, 3); beep(700, 0.12, 'sawtooth', 0.05);
+    } else if (e.t == 'count') { beep(440, 0.12, 'square', 0.05); }
+    else if (e.t == 'go') { beep(880, 0.3, 'square', 0.06); }
+    else if (e.t == 'tick') { beep(660, 0.08, 'square', 0.04); }
+    else if (e.t == 'roundend') { shake = 12; beep(200, 0.5, 'sawtooth', 0.07); }
+    else if (e.t == 'matchend') { beep(523, 0.15, 'square', 0.06); beep(659, 0.15, 'square', 0.06); beep(784, 0.4, 'square', 0.06); }
+  }
+  sim.ev.length = 0;
+}
+
+// =============================================================== RENDER
+function sh(c, a) {
+  var r = [], i, v;
+  for (i = 0; i < 3; i++) {
+    v = a >= 0 ? c[i] + (255 - c[i]) * a : c[i] * (1 + a);
+    r.push(Math.round(v));
+  }
+  return 'rgb(' + r.join(',') + ')';
+}
+function text(t, x, y, size, color, align) {
+  ctx.fillStyle = color || '#fff';
+  ctx.font = 'bold ' + size + 'px monospace';
+  ctx.textAlign = align || 'center';
+  ctx.fillText(t, x, y);
+}
+function ell(x, y, rx, ry) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(1, ry / rx);
+  ctx.beginPath();
+  ctx.arc(0, 0, rx, 0, PI * 2);
+  ctx.restore();
+}
+function poly(pts, color) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(pts[0], pts[1]);
+  for (var i = 2; i < pts.length; i += 2) ctx.lineTo(pts[i], pts[i + 1]);
+  ctx.closePath();
+  ctx.fill();
+}
+function dim(a) { ctx.fillStyle = 'rgba(0,0,0,' + a + ')'; ctx.fillRect(0, 0, W, H); }
+
+// puppet seen from the front/back, local units, feet at (0,0), y up is negative
+function drawBody(idx, p, v, info) {
+  var c = COLS[idx], i, s;
+  var spd = hyp(p.vx, p.vz), moving = Math.min(1, spd / 150);
+  var bob = Math.abs(Math.sin(v.phase)) * 2.5 * moving * (info.air > 0.5 ? 0 : 1);
+  var flop = 0;
+  if (p.stun > 0 && p.stunMax > 0) flop = Math.sin(PI * (1 - p.stun / p.stunMax)) * 1.45 * p.stunDir;
+  var flail = p.stun > 0 ? Math.sin(clock * 22) * 12 : 0;
+  var hx = clamp(v.hl * info.cLat + v.hf * info.cFwd, -18, 18);
+  var hy = clamp(v.hf * 0.25, -6, 6);
+  var hdx = clamp(v.dl * info.cLat + v.df * info.cFwd, -8, 8);
+
+  // shadow (stays on the surface under the puppet)
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ell(0, info.air, 16, 16 * info.k); ctx.fill();
+
+  ctx.save();
+  ctx.rotate(flop);
+  ctx.lineCap = 'round';
+
+  ctx.lineWidth = 5;
+  for (i = 0; i < 2; i++) {
+    s = i == 0 ? -1 : 1;
+    var ph = v.phase + (i == 0 ? 0 : PI);
+    var fx = s * 6 + Math.sin(ph) * moving * 6 + (p.stun > 0 ? flail * s : 0);
+    var lift = Math.max(0, Math.cos(ph)) * 5 * moving;
+    ctx.strokeStyle = sh(c, -0.35);
+    ctx.beginPath(); ctx.moveTo(s * 5, -26 - bob); ctx.lineTo(fx, -lift - 2); ctx.stroke();
+    ctx.fillStyle = sh(c, -0.5);
+    ctx.fillRect(fx - 4, -lift - 4, 8, 4);
+  }
+
+  ctx.fillStyle = sh(c, 0);
+  ctx.fillRect(-8, -50 - bob, 16, 24);
+  ctx.fillStyle = sh(c, 0.25);
+  ctx.fillRect(-8, -50 - bob, 16, 5);
+
+  ctx.lineWidth = 4;
+  for (i = 0; i < 2; i++) {
+    s = i == 0 ? -1 : 1;
+    var rx = s * 6, ry = 20;
+    if (p.dashT > 0) { rx = s * 10; ry = 4; }
+    if (p.grab >= 0) { rx = s * 4; ry = -14; }
+    if (p.stun > 0) { rx = s * (14 + flail * 0.4); ry = -6 + Math.cos(clock * 20 + i) * 8; }
+    var shx = s * 10, shy = -48 - bob;
+    var ex = shx + rx + hx, ey = shy + ry + hy;
+    ctx.strokeStyle = sh(c, -0.2);
+    ctx.beginPath(); ctx.moveTo(shx, shy); ctx.lineTo(ex, ey); ctx.stroke();
+    ctx.fillStyle = sh(c, 0.35);
+    ctx.fillRect(ex - 3, ey - 3, 6, 6);
+  }
+
+  var cx = hdx, cy = -63 - bob, hs = 11;
+  ctx.fillStyle = sh(c, 0.15);
+  ctx.fillRect(cx - hs, cy - hs, hs * 2, hs * 2);
+  poly([cx - hs, cy - hs, cx + hs, cy - hs, cx + hs + 6, cy - hs - 6, cx - hs + 6, cy - hs - 6], sh(c, 0.5));
+  poly([cx + hs, cy - hs, cx + hs + 6, cy - hs - 6, cx + hs + 6, cy + hs - 6, cx + hs, cy + hs], sh(c, -0.25));
+  if (p.stun > 0) {
+    ctx.strokeStyle = '#111'; ctx.lineWidth = 2;
+    for (i = -1; i <= 1; i += 2) {
+      var ex2 = cx + i * 5;
+      ctx.beginPath(); ctx.moveTo(ex2 - 2, cy - 4); ctx.lineTo(ex2 + 2, cy); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(ex2 + 2, cy - 4); ctx.lineTo(ex2 - 2, cy); ctx.stroke();
+    }
+  } else if (info.front) {
+    for (i = -1; i <= 1; i += 2) {
+      var ex3 = cx + info.shift + i * 5;
+      ctx.fillStyle = '#fff'; ctx.fillRect(ex3 - 2, cy - 5, 4, 6);
+      ctx.fillStyle = '#111'; ctx.fillRect(ex3 - 1 + (info.shift > 0 ? 1 : -1) * 0.5, cy - 3, 2, 3);
+    }
+  }
+  ctx.restore();
+
+  if (p.isIt) {
+    var my = -100 + Math.sin(clock * 8) * 4;
+    poly([-9, my - 10, 9, my - 10, 0, my + 2], '#ff4444');
+    text('IT', 0, my - 14, 14, '#ff6666');
+  }
+}
+
+function drawHands(pi, p, v, horizonShift) {
+  var i, s, bobx = Math.sin(v.phase) * 6 * v.moving, boby = Math.abs(Math.cos(v.phase)) * 6 * v.moving;
+  var c = COLS[pi];
+  var lowHands = v.cr * 25;
+  for (i = 0; i < 2; i++) {
+    s = i == 0 ? -1 : 1;
+    var sx = VW / 2 + s * VW * 0.3, sy = VH + 20;
+    var hx = VW / 2 + s * VW * 0.2 + v.hl * 3 + bobx * s * 0.5;
+    var hy = VH - 80 - v.hf * 3 + boby + lowHands;
+    if (p.dashT > 0) { hx = VW / 2 + s * VW * 0.1; hy = VH - 190; }
+    if (p.grab >= 0) { hx = VW / 2 + s * VW * 0.06; hy = VH - 150; }
+    if (p.stun > 0) { hx = VW / 2 + s * (120 + Math.sin(clock * 20) * 30); hy = VH - 200 + Math.cos(clock * 18 + i) * 40; }
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = sh(c, -0.25); ctx.lineWidth = 34;
+    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(hx, hy); ctx.stroke();
+    ctx.fillStyle = sh(c, 0.35);
+    ctx.fillRect(hx - 18, hy - 18, 36, 36);
+  }
+}
+
+function renderView(pi) {
+  var p = sim.p[pi], o = sim.p[1 - pi], v = vis[pi], vo = vis[1 - pi];
+  var i, k;
+  var flopAmt = p.stun > 0 ? Math.sin(PI * (1 - p.stun / p.stunMax)) : 0;
+  var bob = Math.abs(Math.sin(v.phase)) * 3 * v.moving * (p.y <= p.gy + 0.5 ? 1 : 0);
+  var eye = Math.max(14, 55 + p.y - 38 * flopAmt - 22 * v.cr + bob);   // eye height above the floor
+  var horizon = VH / 2 + flopAmt * 70;
+  var focal = F0 * (1 - 0.18 * v.kick);
+  var depth = [];
+  var viewOffset = (Net.mode == 'host' || Net.mode == 'client') ? 0 : pi * VW;
+
+  ctx.save();
+  ctx.beginPath(); ctx.rect(viewOffset, 0, VW, VH); ctx.clip();
+  var shx = 0, shy = 0;
+  if (shake > 0) { shx = (Math.random() - 0.5) * shake; shy = (Math.random() - 0.5) * shake; }
+  ctx.translate(viewOffset + shx, shy);
+
+  // sky + floor
+  var g = ctx.createLinearGradient(0, 0, 0, horizon);
+  g.addColorStop(0, '#0a1020'); g.addColorStop(1, '#2a3f58');
+  ctx.fillStyle = g; ctx.fillRect(-10, -10, VW + 20, horizon + 10);
+  var g2 = ctx.createLinearGradient(0, horizon, 0, VH);
+  g2.addColorStop(0, '#2b3a4a'); g2.addColorStop(1, '#10161e');
+  ctx.fillStyle = g2; ctx.fillRect(-10, horizon, VW + 20, VH - horizon + 10);
+
+  // one vertical strip of wall or pillar, hgt = its height above the floor
+  function strip(ci, tp, base, hgt) {
+    var shade = clamp(1.1 - tp / 450, 0.3, 1);
+    var top = horizon - (hgt - eye) * focal / tp;
+    var bot = horizon + eye * focal / tp;
+    ctx.fillStyle = 'rgb(' + Math.round(base[0] * shade) + ',' + Math.round(base[1] * shade) + ',' + Math.round(base[2] * shade) + ')';
+    ctx.fillRect(ci * COLW, top, COLW, bot - top);
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    ctx.fillRect(ci * COLW, top, COLW, Math.max(1, (bot - top) * 0.05));
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.fillRect(ci * COLW, bot - (bot - top) * 0.06, COLW, (bot - top) * 0.06);
+  }
+
+  // walls and pillars (one ray per column). Arena wall first, then pillars far to near
+  var pillars = sim.pillars, hits = [], hi;
+  for (i = 0; i < NCOL; i++) {
+    var cxs = i * COLW + COLW / 2 - VW / 2;
+    var a = Math.atan(cxs / focal);
+    var ca2 = Math.cos(a);
+    var ang = p.a + a;
+    var dx = Math.cos(ang), dz = Math.sin(ang);
+    var bt = p.x * dx + p.z * dz;
+    var cc = p.x * p.x + p.z * p.z - R * R;
+    var tmin = -bt + Math.sqrt(Math.max(0, bt * bt - cc));
+    var u = Math.atan2(p.z + dz * tmin, p.x + dx * tmin);
+    var alt = Math.floor((u + PI) * 10 / PI) & 1;
+    depth[i] = Math.max(1, tmin * ca2);
+    strip(i, depth[i], alt ? [58, 78, 104] : [48, 66, 90], WALL_H);
+    hits.length = 0;
+    for (k = 0; k < pillars.length; k++) {
+      var ex = p.x - pillars[k].x, ez = p.z - pillars[k].z;
+      var b = ex * dx + ez * dz;
+      var c2 = ex * ex + ez * ez - pillars[k].r * pillars[k].r;
+      var disc = b * b - c2;
+      if (disc >= 0) {
+        var t = -b - Math.sqrt(disc);
+        if (t > 0 && t < tmin) hits.push({ t: t, k: k });
+      }
+    }
+    hits.sort(function (m, n) { return n.t - m.t; });
+    for (hi = 0; hi < hits.length; hi++) {
+      var pk = pillars[hits[hi].k];
+      var pu = Math.atan2(p.z + dz * hits[hi].t - pk.z, p.x + dx * hits[hi].t - pk.x);
+      var palt = Math.floor((pu + PI) * 3 / PI) & 1;
+      var tp = Math.max(1, hits[hi].t * ca2);
+      // Render the pillars to the arena wall height so their upper section
+      // does not reveal the wall texture behind them. Their gameplay height
+      // (pk.h) remains unchanged for jumping, landing and grabbing.
+      strip(i, tp, palt ? [176, 146, 110] : [150, 122, 92], WALL_H);
+      depth[i] = tp;
+    }
+  }
+
+  // opponent sprite
+  var ddx = o.x - p.x, ddz = o.z - p.z;
+  var ca = Math.cos(p.a), sa = Math.sin(p.a);
+  var dF = ddx * ca + ddz * sa, dR = -ddx * sa + ddz * ca;
+  var onScreen = false;
+  if (dF > 6) {
+    var s = focal / dF;
+    var sxc = VW / 2 + dR * s;
+    var groundY = horizon + (eye - o.y) * s;
+    var half = 28 * s;
+    if (sxc + half > 0 && sxc - half < VW) onScreen = true;
+    var c0 = Math.max(0, Math.floor((sxc - half) / COLW));
+    var c1 = Math.min(NCOL - 1, Math.floor((sxc + half) / COLW));
+    var da = o.a - p.a;
+    var info = { cLat: Math.cos(da), cFwd: Math.sin(da), front: Math.cos(da) < 0,
+                 shift: Math.sin(da) * 4, k: clamp(eye / dF * 1.2, 0.08, 0.6), air: o.y - o.gy };
+    var run = -1, ci;
+    for (ci = c0; ci <= c1 + 1; ci++) {
+      var seen = ci <= c1 && depth[ci] > dF;
+      if (seen && run < 0) run = ci;
+      if (!seen && run >= 0) {
+        ctx.save();
+        ctx.beginPath(); ctx.rect(run * COLW, 0, (ci - run) * COLW, VH); ctx.clip();
+        ctx.translate(sxc, groundY);
+        ctx.scale(s, s);
+        drawBody(1 - pi, o, vo, info);
+        ctx.restore();
+        run = -1;
+      }
+    }
+  }
+
+  // particles
+  for (i = 0; i < parts.length; i++) {
+    var q = parts[i];
+    var qx = q.x - p.x, qz = q.z - p.z;
+    var qF = qx * ca + qz * sa, qR = -qx * sa + qz * ca;
+    if (qF < 5) continue;
+    var qs = focal / qF;
+    var qsx = VW / 2 + qR * qs, qsy = horizon - (q.y - eye) * qs;
+    var col = Math.floor(qsx / COLW);
+    if (col < 0 || col >= NCOL || depth[col] < qF) continue;
+    ctx.globalAlpha = clamp(q.life / q.max, 0, 1);
+    ctx.fillStyle = q.col;
+    var sz = Math.max(1, q.size * qs);
+    ctx.fillRect(qsx - sz / 2, qsy - sz / 2, sz, sz);
+  }
+  ctx.globalAlpha = 1;
+
+  drawHands(pi, p, v, flopAmt);
+
+  // tag flash
+  if (v.flash > 0) {
+    ctx.fillStyle = 'rgba(255,40,40,' + (v.flash * 0.5) + ')';
+    ctx.fillRect(0, 0, VW, VH);
+  }
+
+  // HUD
+  var ocol = COLS[1 - pi];
+  if (p.isIt) {
+    ctx.strokeStyle = 'rgba(255,50,50,' + (0.6 + 0.3 * Math.sin(clock * 8)) + ')';
+    ctx.lineWidth = 8;
+    ctx.strokeRect(4, 4, VW - 8, VH - 8);
+  }
+  text(NAMES[pi], 14, 28, 20, sh(COLS[pi], 0.2), 'left');
+  for (k = 0; k < (sim.cfg.solo ? 0 : sim.cfg.wins); k++) {
+    ctx.beginPath(); ctx.arc(20 + k * 18, 44, 6, 0, PI * 2);
+    ctx.fillStyle = k < p.score ? sh(COLS[pi], 0.2) : '#2c3e50'; ctx.fill();
+    ctx.strokeStyle = '#7f8c8d'; ctx.lineWidth = 1; ctx.stroke();
+  }
+  if (sim.mode == 'play' || sim.mode == 'countdown') {
+    text(p.isIt ? 'TAG THEM!' : 'RUN!', VW / 2, 70, 22, p.isIt ? '#ff5252' : '#2ecc71');
+  }
+  // crosshair
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.fillRect(VW / 2 - 1, horizon - 1, 3, 3);
+  // dash bar
+  var bw = 120, bx = VW / 2 - bw / 2;
+  ctx.fillStyle = '#222'; ctx.fillRect(bx, VH - 22, bw, 7);
+  ctx.fillStyle = p.dashCd > 0 ? '#7f8c8d' : '#f1c40f';
+  ctx.fillRect(bx, VH - 22, bw * (1 - Math.max(0, p.dashCd) / DASH_CD), 7);
+  text('dash', VW / 2, VH - 28, 11, '#aaa');
+  // speed readout (handy for finding techniques)
+  text('spd ' + Math.round(hyp(p.vx, p.vz)), 14, VH - 14, 13, '#9fb3c8', 'left');
+  // opponent arrow + distance
+  var dist = Math.round(hyp(ddx, ddz) / 10);
+  text((sim.cfg.solo ? 'dummy ' : 'opp ') + dist + 'm', VW - 14, VH - 14, 13, sh(ocol, 0.3), 'right');
+  if (!onScreen) {
+    var right = dR > 0;
+    var ax = right ? VW - 20 : 20;
+    if (right) poly([ax - 14, VH / 2 - 14, ax + 8, VH / 2, ax - 14, VH / 2 + 14], sh(ocol, 0.2));
+    else poly([ax + 14, VH / 2 - 14, ax - 8, VH / 2, ax + 14, VH / 2 + 14], sh(ocol, 0.2));
+    if (dF <= 6) text('BEHIND', VW / 2, VH / 2 + 80, 14, sh(ocol, 0.2));
+  }
+  // events / state text
+  if (msg.t < 0.9) {
+    ctx.globalAlpha = clamp(1 - msg.t / 0.9, 0, 1);
+    text(msg.txt, VW / 2, 130, 44, msg.col);
+    ctx.globalAlpha = 1;
+  }
+  if (sim.mode == 'countdown') {
+    var n = Math.max(1, Math.ceil(3 - sim.mt));
+    text(n, VW / 2, VH / 2 - 20, 80, '#fff');
+  } else if (sim.mode == 'play' && sim.mt < 0.7 && !sim.cfg.solo) {
+    text('GO!', VW / 2, VH / 2 - 20, 80, '#2ecc71');
+  } else if (sim.mode == 'roundend') {
+    ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fillRect(0, 0, VW, VH);
+    text(sim.winner == pi ? 'ROUND WON' : 'ROUND LOST', VW / 2, VH / 2, 40, sim.winner == pi ? '#2ecc71' : '#ff5252');
+  } else if (sim.mode == 'matchend') {
+    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 0, VW, VH);
+    text(sim.winner == pi ? 'VICTORY' : 'DEFEAT', VW / 2, VH / 2, 54, sim.winner == pi ? '#2ecc71' : '#ff5252');
+    text(sim.p[pi].score + ' - ' + sim.p[1 - pi].score, VW / 2, VH / 2 + 40, 26, '#fff');
+  }
+  ctx.restore();
+}
+
+function drawTitle() {
+  var g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0a1020'); g.addColorStop(1, '#2a3f58');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  text('PUPPET TAG', W / 2, 70, 60, '#fff');
+  text('first person - split screen or solo practice', W / 2, 98, 15, '#aaa');
+  text('P1', 250, 140, 22, sh(COLS[0], 0.2));
+  text('W / S  move', 250, 162, 14, '#ddd');
+  text('Q / E  turn  (or mouse)', 250, 179, 14, '#ddd');
+  text('A / D  strafe', 250, 196, 14, '#ddd');
+  text('F  dash', 250, 213, 14, '#ddd');
+  text('Space  jump', 250, 230, 14, '#ddd');
+  text('Shift  slide (hold)', 250, 247, 14, '#ddd');
+  text('C  grab pillar (hold)', 250, 264, 14, '#ddd');
+  text('P2', 710, 140, 22, sh(COLS[1], 0.2));
+  text('Up / Down  move', 710, 162, 14, '#ddd');
+  text('Left / Right  turn', 710, 179, 14, '#ddd');
+  text(',  /  .  strafe', 710, 196, 14, '#ddd');
+  text('Enter  dash', 710, 213, 14, '#ddd');
+  text('/  jump', 710, 230, 14, '#ddd');
+  text(';  slide (hold)', 710, 247, 14, '#ddd');
+  text("'  grab pillar (hold)", 710, 264, 14, '#ddd');
+  text('Whoever is IT when the clock runs out loses the round. Touch someone while IT to tag.', W / 2, 300, 14, '#bbb');
+  text('Dash into IT to shove them. Grab a pillar, spin up, release to fling where you look.', W / 2, 319, 14, '#bbb');
+  var solo = sim.cfg.solo;
+  text('[G] mode: ' + (solo ? 'SOLO PRACTICE (idle dummy, no clock)' : '2 PLAYER SPLIT SCREEN'), W / 2, 352, 17, '#f1c40f');
+  text('[L] mouse look (P1): ' + (sim.cfg.mouse ? 'on - click the game to capture' : 'off'), W / 2, 376, 17, '#f1c40f');
+  text('[T] round time: ' + (solo ? '-' : sim.cfg.time + 's'), 250, 404, 15, solo ? '#777' : '#f1c40f');
+  text('[M] first to: ' + (solo ? '-' : sim.cfg.wins), 710, 404, 15, solo ? '#777' : '#f1c40f');
+  text('[B] pillars: ' + (sim.cfg.pillars ? 'on' : 'off'), W / 2, 404, 15, '#f1c40f');
+  ctx.globalAlpha = 0.6 + 0.4 * Math.sin(clock * 4);
+  text(Net.mode == 'client' ? 'Waiting for host to start...' : 'Press SPACE to start', W / 2, 455, 26, Net.mode == 'client' ? '#f1c40f' : '#2ecc71');
+  ctx.globalAlpha = 1;
+}
+
+var paused = false;
+var canLock = !!(cv.requestPointerLock || cv.mozRequestPointerLock);
+function renderOnlineView(idx) {
+  if (Net.mode != 'client' || !Net.interpFrom || !Net.interpTo) {
+    renderView(idx);
+    return;
+  }
+  var saved = [], i, p, from, to, a;
+  // Blend between the previous and newest authoritative snapshots over one
+  // snapshot interval. The simulation state itself remains untouched.
+  a = clamp((new Date().getTime() - Net.interpAt) / 50, 0, 1);
+  for (i = 0; i < 2; i++) {
+    p = sim.p[i]; from = Net.interpFrom[i]; to = Net.interpTo[i];
+    saved[i] = { x: p.x, z: p.z, y: p.y, a: p.a };
+    p.x = from.x + (to.x - from.x) * a;
+    p.z = from.z + (to.z - from.z) * a;
+    p.y = from.y + (to.y - from.y) * a;
+    p.a = from.a + Math.atan2(Math.sin(to.a - from.a), Math.cos(to.a - from.a)) * a;
+  }
+  renderView(idx);
+  for (i = 0; i < 2; i++) {
+    p = sim.p[i];
+    p.x = saved[i].x; p.z = saved[i].z; p.y = saved[i].y; p.a = saved[i].a;
+  }
+}
+
+function render() {
+  if (sim.mode == 'title') { drawTitle(); return; }
+  if (Net.mode == 'host' || Net.mode == 'client') {
+    setView(960, 90);
+    if (Net.mode == 'client') renderOnlineView(1);
+    else renderView(0);
+    ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(W / 2 - 105, 0, 210, 22);
+    text(Net.mode == 'host' ? 'ONLINE  |  HOST' : 'ONLINE  |  PLAYER 2', W / 2, 16, 13, '#9fb3c8');
+  } else if (sim.cfg.solo) {
+    setView(960, 90);
+    renderView(0);
+    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(W / 2 - 150, 0, 300, 22);
+    text('PRACTICE  -  R reset  -  P pause', W / 2, 16, 13, '#aaa');
+  } else {
+    setView(480, 66);
+    renderView(0);
+    renderView(1);
+    ctx.fillStyle = '#000'; ctx.fillRect(VW - 2, 0, 4, VH);
+    ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(W / 2 - 52, 0, 104, 48);
+    var secs = Math.ceil(Math.max(0, sim.timeLeft));
+    text(secs, W / 2, 34, 34, (secs <= 5 && sim.mode == 'play') ? '#ff5252' : '#fff');
+    text('Round ' + sim.round, W / 2, 12, 11, '#7f8c8d');
+  }
+  if (sim.cfg.mouse && !Input.locked && !paused && sim.mode != 'matchend') {
+    text(canLock ? 'click to capture mouse' : 'drag the mouse to turn', W / 2, H - 50, 14, '#f1c40f');
+  }
+  if (paused) {
+    dim(0.6);
+    text('PAUSED', W / 2, H / 2, 50, '#fff');
+    text(sim.cfg.mouse && canLock ? 'click or P to resume' : 'P to resume', W / 2, H / 2 + 34, 18, '#aaa');
+  }
+}
+
+// =============================================================== WIRING
+var sim = simNew();
+simToTitle(sim);
+
+function exitLock() {
+  var d = document;
+  if (d.exitPointerLock) d.exitPointerLock();
+  else if (d.mozExitPointerLock) d.mozExitPointerLock();
+}
+function onPress(k) {
+  var i, j;
+  if (k == 27) { paused = false; exitLock(); Input.mx = 0; simToTitle(sim); return; }
+  if (sim.mode == 'title') {
+    if (Net.mode == 'client') return;
+    if (k == 32 || k == 13) simStartMatch(sim);
+    else if (k == 84) sim.cfg.time = TIMES[(TIMES.indexOf(sim.cfg.time) + 1) % TIMES.length];
+    else if (k == 77) sim.cfg.wins = WINS[(WINS.indexOf(sim.cfg.wins) + 1) % WINS.length];
+    else if (k == 66) { sim.cfg.pillars = !sim.cfg.pillars; simPillars(sim); }
+    else if (k == 71) sim.cfg.solo = !sim.cfg.solo;
+    else if (k == 76) sim.cfg.mouse = !sim.cfg.mouse;
+    return;
+  }
+  if (sim.mode == 'matchend') { if (k == 32 || k == 13) simToTitle(sim); return; }
+  if (k == 80) { paused = !paused; return; }
+  if (k == 82 && sim.cfg.solo) { simStartRound(sim); return; }
+  for (i = 0; i < 2; i++) {
+    for (j = 0; j < MAPS[i].act.length; j++)
+      if (MAPS[i].act[j] == k) Input.dashQ[i] = true;
+    for (j = 0; j < MAPS[i].jump.length; j++)
+      if (MAPS[i].jump[j] == k) Input.jumpQ[i] = true;
+  }
+}
+
+// mouse: pointer lock when the browser has it, otherwise click-and-drag to turn
+function lockChange() {
+  var d = document, was = Input.locked;
+  Input.locked = (d.pointerLockElement || d.mozPointerLockElement) === cv;
+  if (Input.locked) Input.drag = false;
+  if (was && !Input.locked && sim.mode != 'title') paused = true;
+}
+if (document.addEventListener) {
+  document.addEventListener('pointerlockchange', lockChange, false);
+  document.addEventListener('mozpointerlockchange', lockChange, false);
+}
+cv.onmousedown = function (e) {
+  e = e || window.event;
+  if (!sim.cfg.mouse || sim.mode == 'title') return;
+  // Always enable drag as a fallback. Some browsers expose the Pointer Lock
+  // API but refuse the request (for example in restricted preview frames).
+  Input.drag = true;
+  Input.lx = e.clientX;
+  if (canLock && !Input.locked) {
+    try { (cv.requestPointerLock || cv.mozRequestPointerLock).call(cv); } catch (err) {}
+  }
+  paused = false;
+};
+document.onmouseup = function () { Input.drag = false; };
+document.onmousemove = function (e) {
+  e = e || window.event;
+  if (paused || sim.mode == 'title') return;
+  if (Input.locked) Input.mx += (e.movementX || e.mozMovementX || 0);
+  else if (Input.drag) { Input.mx += e.clientX - Input.lx; Input.lx = e.clientX; }
+};
+
+document.onkeydown = function (e) {
+  e = e || window.event;
+  var k = e.keyCode || e.which;
+  if (k == 59) k = 186;
+  if ((k >= 37 && k <= 40) || k == 32 || k == 13 || k == 191 || k == 188 || k == 190 || k == 186 || k == 222) {
+    if (e.preventDefault) e.preventDefault();
+  }
+  var was = Input.keys[k];
+  Input.keys[k] = true;
+  if (!was) onPress(k);
+};
+document.onkeyup = function (e) {
+  e = e || window.event;
+  var k = e.keyCode || e.which;
+  if (k == 59) k = 186;
+  Input.keys[k] = false;
+};
+
+var acc = 0, last = new Date().getTime();
+setInterval(function () {
+  var now = new Date().getTime();
+  var dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.1) dt = 0.1;
+  if (dt <= 0) return;
+  if (!paused) {
+    acc += dt;
+    var n = 0;
+    while (acc >= STEP && n < 5) {
+      if (Net.mode != 'client') {
+        simStep(sim, Net.getInputs(sim), STEP);
+        if (Net.mode == 'host') {
+          // Mouse turn deltas are one-shot; movement buttons remain held until updated.
+          Net.remoteInput.t = 0;
+          Net.ticks++;
+          if (Net.ticks % 3 == 0 && Net.channel) {
+            Net.channel.send({ type: 'broadcast', event: 'state', payload: { state: simSnapshot(sim) } });
+          }
+        }
+      }
+      acc -= STEP; n++;
+    }
+    if (n >= 5) acc = 0;
+    if (Net.mode == 'client' && Net.channel && now - Net.lastSend >= 50) {
+      Net.lastSend = now;
+      Net.channel.send({ type: 'broadcast', event: 'input', payload: { input: readIn(0) } });
+    }
+    handleEvents();
+    updateVis(Math.min(dt, 0.05));
+    updateParts(dt);
+  }
+  render();
+}, 16);
+</script>
+</body>
+</html>
