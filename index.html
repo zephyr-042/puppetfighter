@@ -395,7 +395,7 @@ function readIn(i) {
 var Net = {
   mode: 'local', role: 'local', channel: null, room: '', remoteInput: { b: 0, t: 0 },
   lastSend: 0, ticks: 0, status: 'Local mode',
-  interpFrom: null, interpTo: null, interpAt: 0,
+  interpFrom: null, interpTo: null, interpAt: 0, pendingEvents: [],
   getInputs: function (s) {
     if (this.mode == 'host') return [readIn(0), this.remoteInput];
     return [readIn(0), s.cfg.solo ? { b: 0, t: 0 } : readIn(1)];
@@ -423,7 +423,7 @@ function leaveOnline() {
   if (Net.channel) { try { sb.removeChannel(Net.channel); } catch (e) {} }
   Net.channel = null; Net.mode = 'local'; Net.role = 'local'; Net.room = '';
   Net.remoteInput = { b: 0, t: 0 }; Net.ticks = 0; Net.lastSend = 0;
-  Net.interpFrom = null; Net.interpTo = null; Net.interpAt = 0;
+  Net.interpFrom = null; Net.interpTo = null; Net.interpAt = 0; Net.pendingEvents = [];
   setRoomUI(''); netStatus('Local mode is unchanged. Create or join a room to play online.');
   simToTitle(sim);
 }
@@ -434,7 +434,7 @@ function openOnlineRoom(code, role) {
   if (code.length !== 6) { netStatus('Enter a 6-character room code.'); return; }
   Net.mode = role; Net.role = role; Net.room = code;
   Net.remoteInput = { b: 0, t: 0 }; Net.ticks = 0;
-  Net.interpFrom = null; Net.interpTo = null; Net.interpAt = 0;
+  Net.interpFrom = null; Net.interpTo = null; Net.interpAt = 0; Net.pendingEvents = [];
   setRoomUI(code); netStatus('Connecting to room ' + code + '...');
   var ch = sb.channel('puppet-tag-' + code, { config: { broadcast: { self: false } } });
   Net.channel = ch;
@@ -463,7 +463,9 @@ function openOnlineRoom(code, role) {
           ];
           Net.interpAt = new Date().getTime();
         }
+        var networkEvents = incoming.ev || [];
         simRestore(sim, msg.payload.state);
+        if (networkEvents.length) sim.ev = networkEvents;
       } catch (e) { netStatus('Received an invalid game update.'); }
     }
   });
@@ -979,7 +981,7 @@ function renderOnlineView(idx) {
   var saved = [], i, p, from, to, a;
   // Blend between the previous and newest authoritative snapshots over one
   // snapshot interval. The simulation state itself remains untouched.
-  a = clamp((new Date().getTime() - Net.interpAt) / 50, 0, 1);
+  a = clamp((new Date().getTime() - Net.interpAt) / 40, 0, 1);
   for (i = 0; i < 2; i++) {
     p = sim.p[i]; from = Net.interpFrom[i]; to = Net.interpTo[i];
     saved[i] = { x: p.x, z: p.z, y: p.y, a: p.a };
@@ -1124,18 +1126,24 @@ setInterval(function () {
       if (Net.mode != 'client') {
         simStep(sim, Net.getInputs(sim), STEP);
         if (Net.mode == 'host') {
+          // Queue simulation events until a state packet is sent, so tag/impact
+          // effects are delivered even when they occur between network updates.
+          if (sim.ev.length) Net.pendingEvents = Net.pendingEvents.concat(sim.ev);
           // Mouse turn deltas are one-shot; movement buttons remain held until updated.
           Net.remoteInput.t = 0;
           Net.ticks++;
-          if (Net.ticks % 3 == 0 && Net.channel) {
-            Net.channel.send({ type: 'broadcast', event: 'state', payload: { state: simSnapshot(sim) } });
+          if (Net.ticks % 2 == 0 && Net.channel) {
+            var networkState = JSON.parse(simSnapshot(sim));
+            networkState.ev = Net.pendingEvents;
+            Net.pendingEvents = [];
+            Net.channel.send({ type: 'broadcast', event: 'state', payload: { state: JSON.stringify(networkState) } });
           }
         }
       }
       acc -= STEP; n++;
     }
     if (n >= 5) acc = 0;
-    if (Net.mode == 'client' && Net.channel && now - Net.lastSend >= 50) {
+    if (Net.mode == 'client' && Net.channel && now - Net.lastSend >= 33) {
       Net.lastSend = now;
       Net.channel.send({ type: 'broadcast', event: 'input', payload: { input: readIn(0) } });
     }
