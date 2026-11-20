@@ -173,7 +173,7 @@ function stepP(s, i, bits, tdel, dt) {
       var sp2 = clamp(hyp(p.vx, p.vz) + 140, 200, 650);
       p.vx = ca * sp2; p.vz = sa * sp2;
       if (p.jbuf > 0) { p.vy = 300; p.jbuf = 0; }
-      s.ev.push({ t: 'fling', x: p.x, z: p.z, y: p.y + 30 });
+      s.ev.push({ t: 'fling', i: i, x: p.x, z: p.z, y: p.y + 30 });
     }
     p.grab = -1; p.coast = 0.3; p.gcd = 0.3;
     if (p.vy > 0) grounded = false;
@@ -194,7 +194,7 @@ function stepP(s, i, bits, tdel, dt) {
       if (Math.abs(vt) < 60) vt = (vt < 0 ? -60 : 60);
       p.grab = bj; p.gAng = Math.atan2(rz, rx); p.gR = r0; p.gL = vt * r0;
       p.dashT = 0; p.vy = 0;
-      s.ev.push({ t: 'grab', x: p.x, z: p.z });
+      s.ev.push({ t: 'grab', i: i, x: p.x, z: p.z });
     }
   }
 
@@ -212,7 +212,7 @@ function stepP(s, i, bits, tdel, dt) {
   } else {
     if (p.jbuf > 0 && grounded && can) {
       p.vy = 340; p.jbuf = 0; grounded = false;
-      s.ev.push({ t: 'jump', x: p.x, z: p.z });
+      s.ev.push({ t: 'jump', i: i, x: p.x, z: p.z });
     }
     var sliding = grounded && wantSlide && p.dashT <= 0;
     if (sliding && !p.sl) {
@@ -220,7 +220,7 @@ function stepP(s, i, bits, tdel, dt) {
       if (sp0 > 60) {
         var bs = Math.min(1.2, 460 / sp0);
         if (bs > 1) { p.vx *= bs; p.vz *= bs; }
-        s.ev.push({ t: 'slide', x: p.x, z: p.z });
+        s.ev.push({ t: 'slide', i: i, x: p.x, z: p.z });
       }
     }
     p.sl = sliding;
@@ -284,7 +284,7 @@ function stepP(s, i, bits, tdel, dt) {
   if (p.y <= gl) {
     if (p.vy < 0) p.vy = 0;
     p.y = gl;
-    if (wasAir && iv < -40) { p.coast = 0.15; s.ev.push({ t: 'land', x: p.x, z: p.z, v: -iv }); }
+    if (wasAir && iv < -40) { p.coast = 0.15; s.ev.push({ t: 'land', i: i, x: p.x, z: p.z, v: -iv }); }
   }
   p.gy = gl;
 }
@@ -388,23 +388,161 @@ function readIn(i) {
   return { b: readBits(i), t: t };
 }
 
-// =============================================================== NET (stub)
-// Later: in 'host' mode, getInputs returns [local input, remote input] and the host
-// sends simSnapshot() to the client. In 'client' mode, send local input to the host
-// and simRestore() the snapshots that come back.
+// =============================================================== NET + ONLINE PLAY
+// Supabase Realtime Broadcast. The host owns the simulation; the guest sends inputs.
+//
+// Why the guest feels instant:
+//   PREDICTION      the guest runs its own player's physics locally every tick, so controls
+//                   respond immediately. Each tick's input gets a sequence number.
+//   RECONCILIATION  every host snapshot carries `ack` (last input the host applied). The guest
+//                   rebases its player onto the host state and replays the inputs the host has
+//                   not seen yet. Small differences are blended out instead of snapping.
+//   INTERPOLATION   the host's puppet is drawn INTERP_MS in the past, between two snapshots,
+//                   so 30 Hz updates look like smooth motion.
+// Host side: guest inputs go through a tiny jitter buffer, one input per tick. One-shot
+// buttons (dash, jump) ride inside numbered inputs, so they are never lost or doubled.
+var INTERP_MS = 100;
+var DP = [null, null];     // players as displayed this frame (predicted / interpolated on the guest)
 var Net = {
-  mode: 'local', role: 'local', channel: null, room: '', remoteInput: { b: 0, t: 0 },
-  lastSend: 0, ticks: 0, status: 'Local mode',
-  interpFrom: null, interpTo: null, interpAt: 0, pendingEvents: [],
+  mode: 'local', role: 'local', channel: null, room: '', status: 'Local mode',
+  tk: 0, ticks: 0, pendingEvents: [],
+  // host: guest input queue
+  q: [], hseq: 0, used: 0, last: { b: 0, t: 0 }, rebuf: true, starve: 0,
+  // guest: prediction + interpolation
+  seq: 0, pending: [], pp: null, ps: null, err: { x: 0, z: 0, y: 0 }, snaps: [], off: null,
   getInputs: function (s) {
-    if (this.mode == 'host') return [readIn(0), this.remoteInput];
+    if (this.mode == 'host') return [readIn(0), hostRemoteInput()];
     return [readIn(0), s.cfg.solo ? { b: 0, t: 0 } : readIn(1)];
   }
 };
+var OWN_EV = { dash: 1, jump: 1, land: 1, slide: 1, grab: 1, fling: 1 };
 
-// =============================================================== ONLINE PLAY
-// Supabase Realtime Broadcast carries room messages. The host owns the simulation;
-// the joining player sends inputs and renders the host's authoritative snapshots.
+function netReset() {
+  Net.tk = 0; Net.ticks = 0; Net.pendingEvents = [];
+  hostResetIn();
+  Net.seq = 0; Net.pending = []; Net.pp = null; Net.ps = null; Net.err = { x: 0, z: 0, y: 0 };
+  Net.snaps = []; Net.off = null;
+}
+
+// ---------------------------------------------------------------- host side
+function hostResetIn() { Net.q = []; Net.hseq = 0; Net.used = 0; Net.last = { b: 0, t: 0 }; Net.rebuf = true; Net.starve = 0; }
+function hostRemoteInput() {
+  var q = Net.q, it, a, n;
+  if (Net.rebuf && q.length >= 2) Net.rebuf = false;
+  if (!Net.rebuf && q.length) {
+    // too far behind: fold the extra ticks together so latency cannot build up
+    while (q.length > 6) { a = q.shift(); n = q[0]; n.b |= (a.b & 192); n.t += a.t; }
+    it = q.shift();
+    Net.used = it.s; Net.last = it; Net.starve = 0;
+    return { b: it.b, t: it.t };
+  }
+  // starved: hold the movement keys briefly, never repeat dash/jump or turning
+  Net.rebuf = true; Net.starve++;
+  if (Net.starve > 12) return { b: 0, t: 0 };
+  return { b: Net.last.b & ~192, t: 0 };
+}
+function sendState() {
+  var st = JSON.parse(JSON.stringify(sim));
+  st.ev = Net.pendingEvents; Net.pendingEvents = [];
+  st.tk = Net.tk; st.ack = Net.used;
+  Net.channel.send({ type: 'broadcast', event: 'state', payload: { s: st } });
+}
+
+// ---------------------------------------------------------------- guest side
+// advance the predicted own player by one tick, mirroring the order used in simStep
+function predStep(ps, inp) {
+  if (ps.mode == 'title') return;
+  ps.mt += STEP;
+  stepP(ps, 1, inp.b, inp.t, STEP);
+  if (ps.mode == 'countdown' && ps.mt >= 3) { ps.mode = 'play'; ps.mt = 0; }
+}
+function clientTick() {
+  var inp = readIn(0), k;
+  Net.seq++;
+  Net.pending.push({ s: Net.seq, b: inp.b, t: inp.t });
+  if (Net.pending.length > 60) Net.pending.shift();
+  if (Net.ps) {
+    predStep(Net.ps, inp);
+    for (k = 0; k < Net.ps.ev.length; k++) sim.ev.push(Net.ps.ev[k]);   // local feedback for own actions
+    Net.ps.ev.length = 0;
+  }
+  Net.ticks++;
+  if (Net.ticks % 2 == 0 && Net.channel) sendInputs();
+}
+function sendInputs() {
+  var arr = [], k, e, n = Net.pending.length;
+  // resend the recent unacked inputs every packet: a lost packet costs nothing
+  for (k = Math.max(0, n - 16); k < n; k++) { e = Net.pending[k]; arr.push([e.s, e.b, e.t]); }
+  Net.channel.send({ type: 'broadcast', event: 'input', payload: { i: arr } });
+}
+function onSnapshot(inc) {
+  var now = new Date().getTime(), k, e, st = inc.tk * STEP * 1000, o = now - st, r = inc.p[0];
+  // host clock -> local clock offset (tracks the fastest packets, drifts up slowly)
+  if (Net.off === null || Math.abs(o - Net.off) > 500) Net.off = o;
+  else if (o < Net.off) Net.off += (o - Net.off) * 0.3;
+  else Net.off += (o - Net.off) * 0.02;
+  Net.snaps.push({ st: st, x: r.x, z: r.z, y: r.y, a: r.a, vx: r.vx, vz: r.vz });
+  if (Net.snaps.length > 12) Net.snaps.shift();
+  // authoritative state
+  for (k in inc) if (k != 'ev' && k != 'tk' && k != 'ack') sim[k] = inc[k];
+  // events: the guest plays its own actions from prediction, everything else from the host
+  for (k = 0; k < (inc.ev || []).length; k++) {
+    e = inc.ev[k];
+    if (!(OWN_EV[e.t] && e.i === 1)) sim.ev.push(e);
+  }
+  reconcile(inc);
+}
+function reconcile(inc) {
+  var i, old = Net.pp, ox, oz, oy, np, rs, dx, dz, dy;
+  while (Net.pending.length && Net.pending[0].s <= (inc.ack || 0)) Net.pending.shift();
+  np = JSON.parse(JSON.stringify(inc.p[1]));
+  rs = { mode: inc.mode, mt: inc.mt, pillars: inc.pillars, cfg: inc.cfg, ev: [], p: [inc.p[0], np] };
+  for (i = 0; i < Net.pending.length; i++) { predStep(rs, Net.pending[i]); rs.ev.length = 0; }
+  if (old) {
+    // keep what is on screen continuous: error = shown position before - corrected position now
+    ox = old.x + Net.err.x; oz = old.z + Net.err.z; oy = old.y + Net.err.y;
+    dx = ox - np.x; dz = oz - np.z; dy = oy - np.y;
+    if (hyp(dx, dz) < 100 && Math.abs(dy) < 80) { Net.err.x = dx; Net.err.z = dz; Net.err.y = dy; }
+    else { Net.err.x = 0; Net.err.z = 0; Net.err.y = 0; }
+  }
+  Net.pp = np; Net.ps = rs;
+}
+function angDiff(a, b) { return Math.atan2(Math.sin(b - a), Math.cos(b - a)); }
+function interpRemote() {
+  var b = Net.snaps, n = b.length, rt, i, A, B, f, dt;
+  if (!n || Net.off === null) return null;
+  rt = new Date().getTime() - Net.off - INTERP_MS;
+  if (rt <= b[0].st) return b[0];
+  A = b[n - 1];
+  if (rt >= A.st) {
+    dt = Math.min(0.12, (rt - A.st) / 1000);   // snapshots late: extrapolate a little
+    return { x: A.x + A.vx * dt, z: A.z + A.vz * dt, y: A.y, a: A.a, vx: A.vx, vz: A.vz };
+  }
+  for (i = n - 2; i > 0; i--) if (b[i].st <= rt) break;
+  A = b[i]; B = b[i + 1];
+  if (hyp(B.x - A.x, B.z - A.z) > 150) return rt - A.st < B.st - rt ? A : B;   // teleport (round reset)
+  f = (rt - A.st) / ((B.st - A.st) || 1);
+  return { x: A.x + (B.x - A.x) * f, z: A.z + (B.z - A.z) * f, y: A.y + (B.y - A.y) * f,
+           a: A.a + angDiff(A.a, B.a) * f, vx: A.vx + (B.vx - A.vx) * f, vz: A.vz + (B.vz - A.vz) * f };
+}
+function mixP(base, o) {
+  var c = {}, k;
+  for (k in base) c[k] = base[k];
+  for (k in o) c[k] = o[k];
+  return c;
+}
+// players as drawn this frame. Local/host: the sim itself. Guest: predicted self + interpolated host
+function buildDP(dt) {
+  var r, f, e;
+  if (Net.mode != 'client' || !Net.pp || sim.mode == 'title') { DP[0] = sim.p[0]; DP[1] = sim.p[1]; return; }
+  r = interpRemote();
+  DP[0] = r ? mixP(sim.p[0], { x: r.x, z: r.z, y: r.y, a: r.a, vx: r.vx, vz: r.vz }) : sim.p[0];
+  f = Math.exp(-dt * 12);
+  e = Net.err; e.x *= f; e.z *= f; e.y *= f;
+  DP[1] = mixP(Net.pp, { x: Net.pp.x + e.x, z: Net.pp.z + e.z, y: Net.pp.y + e.y });
+}
+
+// ---------------------------------------------------------------- connection
 var SUPABASE_URL = 'https://xkzltynwpbxhdopllhzq.supabase.co';
 var SUPABASE_KEY = 'sb_publishable_WK6_gMdV6DN7OQkKpZSwkQ_N4NMfpOp';
 var sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -422,8 +560,7 @@ function makeRoomCode() {
 function leaveOnline() {
   if (Net.channel) { try { sb.removeChannel(Net.channel); } catch (e) {} }
   Net.channel = null; Net.mode = 'local'; Net.role = 'local'; Net.room = '';
-  Net.remoteInput = { b: 0, t: 0 }; Net.ticks = 0; Net.lastSend = 0;
-  Net.interpFrom = null; Net.interpTo = null; Net.interpAt = 0; Net.pendingEvents = [];
+  netReset();
   setRoomUI(''); netStatus('Local mode is unchanged. Create or join a room to play online.');
   simToTitle(sim);
 }
@@ -432,48 +569,32 @@ function openOnlineRoom(code, role) {
   simToTitle(sim);
   code = String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   if (code.length !== 6) { netStatus('Enter a 6-character room code.'); return; }
+  netReset();
   Net.mode = role; Net.role = role; Net.room = code;
-  Net.remoteInput = { b: 0, t: 0 }; Net.ticks = 0;
-  Net.interpFrom = null; Net.interpTo = null; Net.interpAt = 0; Net.pendingEvents = [];
   setRoomUI(code); netStatus('Connecting to room ' + code + '...');
   var ch = sb.channel('puppet-tag-' + code, { config: { broadcast: { self: false } } });
   Net.channel = ch;
   ch.on('broadcast', { event: 'input' }, function (msg) {
-    if (Net.mode == 'host' && msg.payload && msg.payload.input) Net.remoteInput = msg.payload.input;
+    if (Net.mode != 'host' || !msg.payload || !msg.payload.i) return;
+    var arr = msg.payload.i, k, e;
+    if (arr.length && arr[arr.length - 1][0] < Net.hseq - 120) hostResetIn();   // guest restarted its counter
+    for (k = 0; k < arr.length; k++) {
+      e = arr[k];
+      if (e[0] > Net.hseq) { Net.q.push({ s: e[0], b: e[1], t: e[2] }); Net.hseq = e[0]; }
+    }
+    if (Net.q.length > 200) Net.q.splice(0, Net.q.length - 200);
   });
   ch.on('broadcast', { event: 'state' }, function (msg) {
-    if (Net.mode == 'client' && msg.payload && msg.payload.state) {
-      try {
-        var incoming = JSON.parse(msg.payload.state);
-        if (Net.interpTo && incoming.p && incoming.p.length >= 2) {
-          Net.interpFrom = [
-            { x: Net.interpTo[0].x, z: Net.interpTo[0].z, y: Net.interpTo[0].y, a: Net.interpTo[0].a },
-            { x: Net.interpTo[1].x, z: Net.interpTo[1].z, y: Net.interpTo[1].y, a: Net.interpTo[1].a }
-          ];
-        } else if (incoming.p && incoming.p.length >= 2) {
-          Net.interpFrom = [
-            { x: incoming.p[0].x, z: incoming.p[0].z, y: incoming.p[0].y, a: incoming.p[0].a },
-            { x: incoming.p[1].x, z: incoming.p[1].z, y: incoming.p[1].y, a: incoming.p[1].a }
-          ];
-        }
-        if (incoming.p && incoming.p.length >= 2) {
-          Net.interpTo = [
-            { x: incoming.p[0].x, z: incoming.p[0].z, y: incoming.p[0].y, a: incoming.p[0].a },
-            { x: incoming.p[1].x, z: incoming.p[1].z, y: incoming.p[1].y, a: incoming.p[1].a }
-          ];
-          Net.interpAt = new Date().getTime();
-        }
-        var networkEvents = incoming.ev || [];
-        simRestore(sim, msg.payload.state);
-        if (networkEvents.length) sim.ev = networkEvents;
-      } catch (e) { netStatus('Received an invalid game update.'); }
-    }
+    if (Net.mode != 'client' || !msg.payload || !msg.payload.s) return;
+    var inc = msg.payload.s;
+    if (!inc.p || inc.p.length < 2) return;
+    try { onSnapshot(inc); } catch (e) { netStatus('Received an invalid game update.'); }
   });
   ch.on('broadcast', { event: 'hello' }, function () {
-    if (Net.mode == 'host') netStatus('Opponent connected. Press SPACE to start the match.');
+    if (Net.mode == 'host') { hostResetIn(); netStatus('Opponent connected. Press SPACE to start the match.'); }
   });
   ch.on('broadcast', { event: 'bye' }, function () {
-    if (Net.mode == 'host') { Net.remoteInput = { b: 0, t: 0 }; netStatus('Opponent disconnected. Waiting for someone to rejoin...'); }
+    if (Net.mode == 'host') { hostResetIn(); netStatus('Opponent disconnected. Waiting for someone to rejoin...'); }
   });
   ch.subscribe(function (status) {
     if (status === 'SUBSCRIBED') {
@@ -504,7 +625,7 @@ function updateVis(dt) {
   if (dt < 0.001) return;
   var i, p, v, ax, az, af, al, ca, sa, spd;
   for (i = 0; i < 2; i++) {
-    p = sim.p[i]; v = vis[i];
+    p = DP[i]; v = vis[i];
     ca = Math.cos(p.a); sa = Math.sin(p.a);
     ax = (p.vx - v.lvx) / dt; az = (p.vz - v.lvz) / dt;
     v.lvx = p.vx; v.lvz = p.vz;
@@ -743,7 +864,7 @@ function drawHands(pi, p, v, horizonShift) {
 }
 
 function renderView(pi) {
-  var p = sim.p[pi], o = sim.p[1 - pi], v = vis[pi], vo = vis[1 - pi];
+  var p = DP[pi], o = DP[1 - pi], v = vis[pi], vo = vis[1 - pi];
   var i, k;
   var flopAmt = p.stun > 0 ? Math.sin(PI * (1 - p.stun / p.stunMax)) : 0;
   var bob = Math.abs(Math.sin(v.phase)) * 3 * v.moving * (p.y <= p.gy + 0.5 ? 1 : 0);
@@ -931,7 +1052,7 @@ function renderView(pi) {
   } else if (sim.mode == 'matchend') {
     ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 0, VW, VH);
     text(sim.winner == pi ? 'VICTORY' : 'DEFEAT', VW / 2, VH / 2, 54, sim.winner == pi ? '#2ecc71' : '#ff5252');
-    text(sim.p[pi].score + ' - ' + sim.p[1 - pi].score, VW / 2, VH / 2 + 40, 26, '#fff');
+    text(DP[pi].score + ' - ' + DP[1 - pi].score, VW / 2, VH / 2 + 40, 26, '#fff');
   }
   ctx.restore();
 }
@@ -973,36 +1094,11 @@ function drawTitle() {
 
 var paused = false;
 var canLock = !!(cv.requestPointerLock || cv.mozRequestPointerLock);
-function renderOnlineView(idx) {
-  if (Net.mode != 'client' || !Net.interpFrom || !Net.interpTo) {
-    renderView(idx);
-    return;
-  }
-  var saved = [], i, p, from, to, a;
-  // Blend between the previous and newest authoritative snapshots over one
-  // snapshot interval. The simulation state itself remains untouched.
-  a = clamp((new Date().getTime() - Net.interpAt) / 40, 0, 1);
-  for (i = 0; i < 2; i++) {
-    p = sim.p[i]; from = Net.interpFrom[i]; to = Net.interpTo[i];
-    saved[i] = { x: p.x, z: p.z, y: p.y, a: p.a };
-    p.x = from.x + (to.x - from.x) * a;
-    p.z = from.z + (to.z - from.z) * a;
-    p.y = from.y + (to.y - from.y) * a;
-    p.a = from.a + Math.atan2(Math.sin(to.a - from.a), Math.cos(to.a - from.a)) * a;
-  }
-  renderView(idx);
-  for (i = 0; i < 2; i++) {
-    p = sim.p[i];
-    p.x = saved[i].x; p.z = saved[i].z; p.y = saved[i].y; p.a = saved[i].a;
-  }
-}
-
 function render() {
   if (sim.mode == 'title') { drawTitle(); return; }
   if (Net.mode == 'host' || Net.mode == 'client') {
     setView(960, 90);
-    if (Net.mode == 'client') renderOnlineView(1);
-    else renderView(0);
+    renderView(Net.mode == 'client' ? 1 : 0);
     ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(W / 2 - 105, 0, 210, 22);
     text(Net.mode == 'host' ? 'ONLINE  |  HOST' : 'ONLINE  |  PLAYER 2', W / 2, 16, 13, '#9fb3c8');
   } else if (sim.cfg.solo) {
@@ -1123,30 +1219,24 @@ setInterval(function () {
     acc += dt;
     var n = 0;
     while (acc >= STEP && n < 5) {
-      if (Net.mode != 'client') {
+      if (Net.mode == 'client') {
+        clientTick();                       // guest: predict own player, send numbered inputs
+      } else {
+        var evBefore = sim.ev.length;
         simStep(sim, Net.getInputs(sim), STEP);
         if (Net.mode == 'host') {
-          // Queue simulation events until a state packet is sent, so tag/impact
-          // effects are delivered even when they occur between network updates.
-          if (sim.ev.length) Net.pendingEvents = Net.pendingEvents.concat(sim.ev);
-          // Mouse turn deltas are one-shot; movement buttons remain held until updated.
-          Net.remoteInput.t = 0;
-          Net.ticks++;
-          if (Net.ticks % 2 == 0 && Net.channel) {
-            var networkState = JSON.parse(simSnapshot(sim));
-            networkState.ev = Net.pendingEvents;
-            Net.pendingEvents = [];
-            Net.channel.send({ type: 'broadcast', event: 'state', payload: { state: JSON.stringify(networkState) } });
-          }
+          // queue this tick's events so they reach the guest with the next snapshot
+          if (sim.ev.length > evBefore) Net.pendingEvents = Net.pendingEvents.concat(sim.ev.slice(evBefore));
+          Net.tk++; Net.ticks++;
+          if (Net.ticks % 2 == 0 && Net.channel) sendState();
         }
       }
       acc -= STEP; n++;
     }
     if (n >= 5) acc = 0;
-    if (Net.mode == 'client' && Net.channel && now - Net.lastSend >= 33) {
-      Net.lastSend = now;
-      Net.channel.send({ type: 'broadcast', event: 'input', payload: { input: readIn(0) } });
-    }
+  }
+  buildDP(dt);
+  if (!paused) {
     handleEvents();
     updateVis(Math.min(dt, 0.05));
     updateParts(dt);
