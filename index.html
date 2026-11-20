@@ -33,7 +33,7 @@
             no Math.random. State is plain data -> simSnapshot / simRestore.
             An input is { b: key bitmask, t: turn delta in radians }.
     INPUT   keyboard + mouse -> one small input object per player.
-    NET     stub. Net.getInputs() is where remote inputs/snapshots plug in later.
+    NET     online play: host runs SIM and broadcasts snapshots, guest predicts itself (see NET section).
     VIS     local-only visuals (springs, bob, particles). Not part of the state.
     RENDER  raycaster + sprites, one view per player (or one full view in solo).
 
@@ -44,6 +44,69 @@
     grab   hold near a pillar: orbit it, W/S changes radius (speed), release to fling
            in your facing direction (jump while grabbed = fling upward)
 */
+/* ===================================================================================
+   HANDOFF NOTES - read this first if you are continuing this project
+   ===================================================================================
+   WHAT THIS IS
+     Single-file first-person puppet tag game: local split screen, solo practice, and online
+     2-player (host-authoritative) over Supabase Realtime Broadcast.
+
+   HOW THE SCRIPT IS ORGANISED (in file order)
+     SIM     pure rules at a fixed 60 Hz. No drawing, no keyboard, no Math.random. State is plain
+             data (simSnapshot / JSON). One tick = one STEP.
+     INPUT   keyboard + mouse -> one input per player: { b: key bitmask, t: turn delta (rad) }.
+     NET     host runs SIM and broadcasts snapshots. The guest predicts its own player and
+             interpolates the host's puppet. Details in the NET section comment.
+     VIS     local-only eye candy (hand springs, particles, shake). Never part of networked state.
+     RENDER  raycaster. IMPORTANT: render/vis code must read players through DP[] ("displayed
+             players"), never sim.p directly. On the guest DP[] holds predicted/interpolated copies.
+
+   HISTORY
+     v1  base game, movement verbs, online beta. Guest felt laggy (waited for host round trips).
+     v2  guest-side prediction + reconciliation, host-puppet interpolation, numbered inputs with a
+         host jitter buffer, events de-duplicated. Own movement 238 ms -> 56 ms in a simulated test
+         at ~150 ms round trip.
+     v3  "gets laggier the longer you play, then freezes in a loop".
+         Diagnosis: NOT reproducible locally. A 150 s two-client soak showed flat heap, flat array
+         sizes and steady frame gaps, so the local game loop is not leaking. The remaining cause is
+         message volume. Supabase's documented free-plan limit is 100 events/s per project, where
+         an event is a message sent from OR delivered to a client; over the limit the project's
+         connections are disconnected and supabase-js rejoins, which looks exactly like lag then a
+         freeze that repeats. v2 sent 30 msg/s from each side: 60 sent + 60 delivered = 120/s.
+         (Not confirmed on the live project: check Realtime logs/Reports in the Supabase dashboard
+         for rate-limit errors.)
+         Fix: send rates are now NET_STATE_EVERY / NET_INPUT_EVERY ticks (host 20/s, guest 15/s,
+         = 70 events/s). Sends are skipped while the channel is not joined (otherwise supabase-js
+         falls back to one HTTP request per message, which makes a bad situation worse), and
+         stale queued events are capped so a reconnect does not replay a burst of old effects.
+
+   PLANNED NEXT (in this order)
+     1. Bigger map. Today the arena is the constant R = 270 and simPillars() hardcodes 4 pillars;
+        stepP() and the raycaster in renderView() both assume a circular arena of radius R.
+        Make arena size, pillar list and spawn points data (a map object in sim state) and read
+        them everywhere instead of R / the literal pillar list.
+     2. Up to 6 players. sim.p is assumed to have exactly 2 entries in many places: simStep,
+        collide, endRound, Net.getInputs, buildDP/DP, renderView (single "opponent" sprite),
+        HUD, MAPS. Needs N-player tag rules, an opponents loop with depth-sorted sprites, and one
+        view per client online (split screen stays a 2-player local feature).
+     3. DECIDE THE TRANSPORT BEFORE STEP 2. Broadcast delivers every message to every member of
+        the channel, so events/s grow roughly with senders x members. 6 players at the current
+        rates is several hundred events/s, far above the free plan's 100. Options: lower rates
+        and smaller payloads (send only changed fields), a paid Supabase plan, or a different
+        transport (WebRTC data channels with Supabase only for signalling, or a small own relay).
+
+   TESTING WITHOUT SUPABASE
+     Online code can be tested locally: stub window.supabase.createClient with an in-page fake
+     channel (on / subscribe / send / state) and relay messages between two pages through a
+     script that adds latency and jitter. Things worth measuring: time until your own movement is
+     visible, smoothness of the other puppet, heap + array sizes over minutes, and behaviour when
+     the fake channel goes down and rejoins. Dev-only checks used so far are not in this file.
+
+   KNOWN LIMITS
+     - Tags are decided by the host, so the guest sees them one network trip late.
+     - The guest sees the host's puppet about INTERP_MS (100 ms) in the past by design.
+     - Guest prediction does not model player-vs-player pushing; the host corrects it smoothly.
+   =================================================================================== */
 var cv = document.getElementById('c');
 var ctx = cv.getContext('2d');
 var W = 960, H = 480, VW = 480, VH = 480, COLW = 2, NCOL = VW / COLW;
@@ -401,7 +464,19 @@ function readIn(i) {
 //                   so 30 Hz updates look like smooth motion.
 // Host side: guest inputs go through a tiny jitter buffer, one input per tick. One-shot
 // buttons (dash, jump) ride inside numbered inputs, so they are never lost or doubled.
-var INTERP_MS = 100;
+var INTERP_MS = 100;       // how far in the past the guest draws the host puppet (>= 2 snapshot intervals)
+
+// ---- message budget (this is what fixed "laggier and laggier, then freezes in a loop") ----------
+// Supabase Realtime free plan: 100 events/s per project. An event = one message sent from a
+// client OR delivered to a client, and the connection is dropped when the project exceeds it.
+// Events/s ~= (host sends + guest sends) x 2 for a two-player room.
+//   host snapshots: 60 / NET_STATE_EVERY  -> 20/s
+//   guest inputs:   60 / NET_INPUT_EVERY  -> 15/s      total (20 + 15) x 2 = 70 events/s
+// If you change these, redo the arithmetic. INTERP_MS must stay >= 2 snapshot intervals
+// (2 x 1000 * NET_STATE_EVERY / 60 ms), and the guest resends its last 16 inputs in every
+// packet, so NET_INPUT_EVERY above ~8 would start to lose inputs.
+var NET_STATE_EVERY = 3;
+var NET_INPUT_EVERY = 4;
 var DP = [null, null];     // players as displayed this frame (predicted / interpolated on the guest)
 var Net = {
   mode: 'local', role: 'local', channel: null, room: '', status: 'Local mode',
@@ -409,7 +484,7 @@ var Net = {
   // host: guest input queue
   q: [], hseq: 0, used: 0, last: { b: 0, t: 0 }, rebuf: true, starve: 0,
   // guest: prediction + interpolation
-  seq: 0, pending: [], pp: null, ps: null, err: { x: 0, z: 0, y: 0 }, snaps: [], off: null,
+  seq: 0, pending: [], pp: null, ps: null, err: { x: 0, z: 0, y: 0 }, snaps: [], off: null, joined: false,
   getInputs: function (s) {
     if (this.mode == 'host') return [readIn(0), hostRemoteInput()];
     return [readIn(0), s.cfg.solo ? { b: 0, t: 0 } : readIn(1)];
@@ -417,11 +492,17 @@ var Net = {
 };
 var OWN_EV = { dash: 1, jump: 1, land: 1, slide: 1, grab: 1, fling: 1 };
 
+// true when it is safe to broadcast. supabase-js falls back to one HTTP POST per message when the
+// socket is not joined, which floods the network during a reconnect, so we simply skip sends then.
+function netCanSend() {
+  var c = Net.channel;
+  return !!c && (c.state === undefined || c.state === 'joined');
+}
 function netReset() {
   Net.tk = 0; Net.ticks = 0; Net.pendingEvents = [];
   hostResetIn();
   Net.seq = 0; Net.pending = []; Net.pp = null; Net.ps = null; Net.err = { x: 0, z: 0, y: 0 };
-  Net.snaps = []; Net.off = null;
+  Net.snaps = []; Net.off = null; Net.joined = false;
 }
 
 // ---------------------------------------------------------------- host side
@@ -467,7 +548,7 @@ function clientTick() {
     Net.ps.ev.length = 0;
   }
   Net.ticks++;
-  if (Net.ticks % 2 == 0 && Net.channel) sendInputs();
+  if (Net.ticks % NET_INPUT_EVERY == 0 && netCanSend()) sendInputs();
 }
 function sendInputs() {
   var arr = [], k, e, n = Net.pending.length;
@@ -596,12 +677,19 @@ function openOnlineRoom(code, role) {
   ch.on('broadcast', { event: 'bye' }, function () {
     if (Net.mode == 'host') { hostResetIn(); netStatus('Opponent disconnected. Waiting for someone to rejoin...'); }
   });
+  // supabase-js calls this again after every automatic rejoin, so SUBSCRIBED can fire repeatedly.
+  // On a rejoin the guest says hello again (the host then resets its input queue); sequence
+  // numbers keep counting up, so nothing else needs resetting. See the v3 notes at the top.
   ch.subscribe(function (status) {
     if (status === 'SUBSCRIBED') {
-      if (role == 'host') netStatus('Room ready. Share the code above; waiting for opponent...');
-      else { netStatus('Joined room. Waiting for host to start. Use W/S, A/D, Q/E, F, SPACE and SHIFT to play.'); ch.send({ type: 'broadcast', event: 'hello', payload: { role: 'client' } }); }
+      var again = Net.joined; Net.joined = true;
+      if (role == 'host') netStatus(again ? 'Reconnected.' : 'Room ready. Share the code above; waiting for opponent...');
+      else {
+        netStatus(again ? 'Reconnected.' : 'Joined room. Waiting for host to start. Use W/S, A/D, Q/E, F, SPACE and SHIFT to play.');
+        ch.send({ type: 'broadcast', event: 'hello', payload: { role: 'client' } });
+      }
     } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
-      netStatus('Connection issue (' + status + '). Try leaving and joining again.');
+      netStatus('Connection issue (' + status + '). Reconnecting automatically; if it does not recover, leave and join again.');
     }
   });
 }
@@ -1227,8 +1315,11 @@ setInterval(function () {
         if (Net.mode == 'host') {
           // queue this tick's events so they reach the guest with the next snapshot
           if (sim.ev.length > evBefore) Net.pendingEvents = Net.pendingEvents.concat(sim.ev.slice(evBefore));
+          // while disconnected nothing flushes this list; keep only the newest so a reconnect
+          // does not replay a burst of old sounds/particles
+          if (Net.pendingEvents.length > 40) Net.pendingEvents.splice(0, Net.pendingEvents.length - 40);
           Net.tk++; Net.ticks++;
-          if (Net.ticks % 2 == 0 && Net.channel) sendState();
+          if (Net.ticks % NET_STATE_EVERY == 0 && netCanSend()) sendState();
         }
       }
       acc -= STEP; n++;
