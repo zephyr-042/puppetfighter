@@ -5,14 +5,16 @@
 <title>The Real Puppet Fighter</title>
 <style>
   body { margin: 0; background: #000; color: #888; font-family: monospace; text-align: center; }
-  canvas { background: #111; border: 2px solid #444; margin-top: 8px; }
+  canvas { display: block; margin: 4px auto 0; background: #111; border: 2px solid #444; }
   p { margin: 6px; font-size: 12px; }
+  #ui { padding: 1px 0; }
 </style>
 </head>
 <body>
 <canvas id="c" width="960" height="480"></canvas>
-<div id="onlinePanel" style="max-width:960px;margin:10px auto 18px;padding:10px;border:1px solid #34495e;background:#101923;color:#ddd;font:13px monospace;text-align:center">
-  <div style="font-size:15px;color:#f1c40f;margin-bottom:8px">ONLINE PLAY (BETA)</div>
+<div id="ui">
+<div id="onlinePanel" style="max-width:960px;margin:10px auto 8px;padding:10px;border:1px solid #34495e;background:#101923;color:#ddd;font:13px monospace;text-align:center">
+  <div style="font-size:15px;color:#f1c40f;margin-bottom:8px">ONLINE PLAY (BETA, 2 players)</div>
   <button id="createRoom">Create room</button>
   <span style="padding:0 8px;color:#777">or</span>
   <input id="roomCode" maxlength="6" placeholder="ROOM CODE" autocomplete="off" style="width:110px;text-transform:uppercase;text-align:center;font: bold 15px monospace;padding:5px;background:#080d13;color:#fff;border:1px solid #526579">
@@ -20,13 +22,14 @@
   <div id="netStatus" style="margin-top:8px;color:#9fb3c8">Local mode is unchanged. Create or join a room to play online.</div>
   <div id="roomActions" style="margin-top:6px;display:none">Room code: <strong id="roomLabel" style="color:#2ecc71;letter-spacing:2px"></strong> — share this code with your opponent. <button id="leaveRoom">Leave room</button></div>
 </div>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <p>P1: W/S move, Q/E or mouse turn, A/D strafe, F dash, Space jump, Shift slide (hold), C grab pillar (hold)</p>
-<p>P2: Up/Down move, Left/Right turn, , / . strafe, Enter dash, / jump, ; slide (hold), ' grab (hold) &nbsp;|&nbsp; P pause, R reset (solo), Esc title</p>
+<p>P2: Up/Down move, Left/Right turn, , / . strafe, Enter dash, / jump, ; slide (hold), ' grab (hold) &nbsp;|&nbsp; P pause, R reset (solo), Esc title, F11 fullscreen</p>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
 <script>
 /*
-  PUPPET TAG - first person, 2 player split screen or solo practice.
+  PUPPET TAG - first person, split screen / solo practice / online.
   Plain ES5 on purpose, for old/limited browsers.
 
     SIM     pure game logic. simStep(state, inputs, dt). No drawing, no keyboard,
@@ -48,73 +51,76 @@
    HANDOFF NOTES - read this first if you are continuing this project
    ===================================================================================
    WHAT THIS IS
-     Single-file first-person puppet tag game: local split screen, solo practice, and online
-     2-player (host-authoritative) over Supabase Realtime Broadcast.
+     Single-file first-person puppet tag game: local split screen (2 players), solo practice
+     (1 human + up to 5 idle dummies), and online 2-player (host-authoritative) over Supabase
+     Realtime Broadcast.
 
    HOW THE SCRIPT IS ORGANISED (in file order)
      SIM     pure rules at a fixed 60 Hz. No drawing, no keyboard, no Math.random. State is plain
-             data (simSnapshot / JSON). One tick = one STEP.
+             data (simSnapshot / JSON). One tick = one STEP. The sim is N-PLAYER (sim.p has 1..6
+             entries, set by simSetN) and the map is DATA: sim.R (arena radius) and sim.pillars,
+             built from MAPDEFS / mapPillars() by simPillars(). Spawns sit on a ring of radius
+             0.63 * R, everyone facing the centre.
      INPUT   keyboard + mouse -> one input per player: { b: key bitmask, t: turn delta (rad) }.
-     NET     host runs SIM and broadcasts snapshots. The guest predicts its own player and
-             interpolates the host's puppet. Details in the NET section comment.
+     NET     host runs SIM and broadcasts snapshots. The guest predicts its own player (index
+             Net.me) and interpolates every other player. Details in the NET section comment.
      VIS     local-only eye candy (hand springs, particles, shake). Never part of networked state.
      RENDER  raycaster. IMPORTANT: render/vis code must read players through DP[] ("displayed
              players"), never sim.p directly. On the guest DP[] holds predicted/interpolated copies.
+             renderView draws every other player as a depth-sorted sprite.
+
+   TAG RULES (N players)
+     One player is IT. IT touching anyone passes the tag (1.4 s cooldown). Dashing into IT shoves
+     them. Each player accumulates itT, the time spent as IT, during a round. When the clock ends
+     the player with the LOWEST itT wins the round (tie: the one who is not IT). Stored in
+     endRound(); a one-line change if you want a different rule. Solo practice has no clock.
+
+   LAYOUT
+     The canvas keeps its 960x480 internal size and is scaled by CSS to fit the window (fit()).
+     The online panel + help text live in #ui, shown on the title screen and hidden in game, so
+     the game gets the whole window. F11 for browser fullscreen.
 
    HISTORY
      v1  base game, movement verbs, online beta. Guest felt laggy (waited for host round trips).
      v2  guest-side prediction + reconciliation, host-puppet interpolation, numbered inputs with a
-         host jitter buffer, events de-duplicated. Own movement 238 ms -> 56 ms in a simulated test
-         at ~150 ms round trip.
-     v3  "gets laggier the longer you play, then freezes in a loop".
-         Diagnosis: NOT reproducible locally. A 150 s two-client soak showed flat heap, flat array
-         sizes and steady frame gaps, so the local game loop is not leaking. The remaining cause is
-         message volume. Supabase's documented free-plan limit is 100 events/s per project, where
-         an event is a message sent from OR delivered to a client; over the limit the project's
-         connections are disconnected and supabase-js rejoins, which looks exactly like lag then a
-         freeze that repeats. v2 sent 30 msg/s from each side: 60 sent + 60 delivered = 120/s.
-         (Not confirmed on the live project: check Realtime logs/Reports in the Supabase dashboard
-         for rate-limit errors.)
-         Fix: send rates are now NET_STATE_EVERY / NET_INPUT_EVERY ticks (host 20/s, guest 15/s,
-         = 70 events/s). Sends are skipped while the channel is not joined (otherwise supabase-js
-         falls back to one HTTP request per message, which makes a bad situation worse), and
-         stale queued events are capped so a reconnect does not replay a burst of old effects.
+         host jitter buffer, events de-duplicated.
+     v3  "gets laggier the longer you play, then freezes". Cause: message volume against
+         Supabase's free-plan limit of 100 events/s (sent + delivered). Send rates are now
+         NET_STATE_EVERY / NET_INPUT_EVERY ticks (host 20/s, guest 15/s = 70 events/s); sends are
+         skipped while the channel is not joined; stale queued events are capped.
+     v4  N-player sim (up to 6), map as data (two maps), multi-opponent renderer, IT-time scoring,
+         window-fitted canvas and collapsible UI. Online is still 2 players; the guest uses Net.me.
 
-   PLANNED NEXT (in this order)
-     1. Bigger map. Today the arena is the constant R = 270 and simPillars() hardcodes 4 pillars;
-        stepP() and the raycaster in renderView() both assume a circular arena of radius R.
-        Make arena size, pillar list and spawn points data (a map object in sim state) and read
-        them everywhere instead of R / the literal pillar list.
-     2. Up to 6 players. sim.p is assumed to have exactly 2 entries in many places: simStep,
-        collide, endRound, Net.getInputs, buildDP/DP, renderView (single "opponent" sprite),
-        HUD, MAPS. Needs N-player tag rules, an opponents loop with depth-sorted sprites, and one
-        view per client online (split screen stays a 2-player local feature).
-     3. DECIDE THE TRANSPORT BEFORE STEP 2. Broadcast delivers every message to every member of
-        the channel, so events/s grow roughly with senders x members. 6 players at the current
-        rates is several hundred events/s, far above the free plan's 100. Options: lower rates
-        and smaller payloads (send only changed fields), a paid Supabase plan, or a different
-        transport (WebRTC data channels with Supabase only for signalling, or a small own relay).
+   PLANNED NEXT
+     Peer-to-peer transport for more than 2 players online. Keep the host-authoritative star:
+     the host runs simStep and each guest sends inputs. Needed changes:
+       - Net.getInputs: one remote queue per guest (today a single queue feeds player index 1).
+       - Net.me per client (today the constant 1); host assigns indices on join.
+       - Online lobby start: sim.cfg.n = number of connected players (today forced to 2).
+       - Transport: WebRTC data channels, with Supabase used only for signalling (room code +
+         offer/answer/ICE). Expect to need a TURN fallback for some NATs. Send compact snapshots
+         (round positions, send only changed fields) since the host sends to up to 5 clients.
+       - Broadcast through Supabase cannot carry 6 players (events/s grow with senders x members).
 
    TESTING WITHOUT SUPABASE
-     Online code can be tested locally: stub window.supabase.createClient with an in-page fake
-     channel (on / subscribe / send / state) and relay messages between two pages through a
-     script that adds latency and jitter. Things worth measuring: time until your own movement is
-     visible, smoothness of the other puppet, heap + array sizes over minutes, and behaviour when
-     the fake channel goes down and rejoins. Dev-only checks used so far are not in this file.
+     Stub window.supabase.createClient with an in-page fake channel (on / subscribe / send /
+     state) and relay messages between two pages, adding latency and jitter. Local N-player
+     testing needs no network at all: Solo mode, [N] picks 2-6 players (the rest are idle dummies).
 
    KNOWN LIMITS
      - Tags are decided by the host, so the guest sees them one network trip late.
-     - The guest sees the host's puppet about INTERP_MS (100 ms) in the past by design.
+     - The guest sees other puppets about INTERP_MS (100 ms) in the past by design.
      - Guest prediction does not model player-vs-player pushing; the host corrects it smoothly.
+     - Pillars are drawn at wall height even though their gameplay height is pk.h.
    =================================================================================== */
 var cv = document.getElementById('c');
 var ctx = cv.getContext('2d');
 var W = 960, H = 480, VW = 480, VH = 480, COLW = 2, NCOL = VW / COLW;
-var PI = Math.PI, R = 270, STEP = 1 / 60, DASH_CD = 1.3;
+var PI = Math.PI, STEP = 1 / 60, DASH_CD = 1.3, MAXP = 6;
 var F0 = (VW / 2) / Math.tan(33 * PI / 180);   // 66 degree field of view
 var WALL_H = 100, SPRITE_H = 80;
-var COLS = [[52, 152, 219], [230, 126, 34]];
-var NAMES = ['P1', 'P2'];
+var COLS = [[52, 152, 219], [230, 126, 34], [46, 204, 113], [155, 89, 182], [241, 196, 15], [26, 188, 156]];
+var NAMES = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6'];
 var TIMES = [20, 30, 45, 60], WINS = [1, 2, 3, 5];
 
 function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
@@ -122,19 +128,39 @@ function hyp(x, y) { return Math.sqrt(x * x + y * y); }
 function setView(w, fovDeg) { VW = w; NCOL = w / COLW; F0 = (VW / 2) / Math.tan(fovDeg * PI / 360); }
 
 // =============================================================== SIM
+// maps are data: arena radius + pillar list. Add an entry here and a case in mapPillars().
+var MAPDEFS = [{ name: 'Arena', R: 270 }, { name: 'Large', R: 420 }];
+function mapPillars(k) {
+  var out = [], i, a;
+  if (k == 0) {
+    out.push({ x: -85, z: -75, r: 20, h: 40 });
+    out.push({ x: 85, z: 75, r: 20, h: 40 });
+    out.push({ x: -85, z: 75, r: 20, h: 40 });
+    out.push({ x: 85, z: -75, r: 20, h: 40 });
+  } else {
+    for (i = 0; i < 4; i++) { a = PI / 4 + i * PI / 2; out.push({ x: Math.cos(a) * 150, z: Math.sin(a) * 150, r: 22, h: 40 }); }
+    for (i = 0; i < 8; i++) { a = PI / 8 + i * PI / 4; out.push({ x: Math.cos(a) * 300, z: Math.sin(a) * 300, r: 26, h: 40 }); }
+    out.push({ x: 0, z: 0, r: 30, h: 40 });
+  }
+  return out;
+}
 function srand(s) {
   s.seed = (s.seed * 1664525 + 1013904223) >>> 0;
   return s.seed / 4294967296;
 }
 function mkP() {
   return { x: 0, z: 0, y: 0, vx: 0, vz: 0, vy: 0, gy: 0, a: 0, dashT: 0, dashCd: 0, dashX: 1, dashZ: 0,
-           stun: 0, stunMax: 1, stunDir: 1, isIt: false, score: 0,
+           stun: 0, stunMax: 1, stunDir: 1, isIt: false, score: 0, itT: 0,
            sl: false, grab: -1, gAng: 0, gR: 0, gL: 0, gcd: 0, coast: 0, jbuf: 0 };
 }
 function simNew() {
-  return { mode: 'title', mt: 0, cfg: { time: 30, wins: 3, pillars: true, solo: false, mouse: true },
+  return { mode: 'title', mt: 0, cfg: { time: 30, wins: 3, pillars: true, solo: false, mouse: true, n: 2, map: 0 },
            round: 1, timeLeft: 30, tagCd: 0, lastCount: 4, lastSec: 99, seed: 12345,
-           winner: -1, p: [mkP(), mkP()], pillars: [], ev: [] };
+           winner: -1, R: 270, p: [mkP(), mkP()], pillars: [], ev: [] };
+}
+function simSetN(s, n) {
+  while (s.p.length < n) s.p.push(mkP());
+  s.p.length = n;
 }
 function simSnapshot(s) {
   var c = JSON.parse(JSON.stringify(s));
@@ -149,40 +175,40 @@ function simRestore(s, str) {
 function setStun(p, d, dir) { p.stun = d; p.stunMax = d; p.stunDir = dir; }
 
 function simPillars(s) {
-  s.pillars = [];
-  if (s.cfg.pillars) {
-    s.pillars.push({ x: -85, z: -75, r: 20, h: 40 });
-    s.pillars.push({ x: 85, z: 75, r: 20, h: 40 });
-    s.pillars.push({ x: -85, z: 75, r: 20, h: 40 });
-    s.pillars.push({ x: 85, z: -75, r: 20, h: 40 });
-  }
+  s.R = MAPDEFS[s.cfg.map].R;
+  s.pillars = s.cfg.pillars ? mapPillars(s.cfg.map) : [];
 }
 function simResetPlayers(s) {
-  var i, p;
-  for (i = 0; i < 2; i++) {
+  var i, p, th, n = s.p.length;
+  for (i = 0; i < n; i++) {
     p = s.p[i];
-    p.x = i == 0 ? -170 : 170; p.z = 0; p.y = 0; p.gy = 0;
-    p.a = i == 0 ? 0 : PI;
-    p.vx = p.vz = p.vy = 0; p.dashT = 0; p.dashCd = 0; p.stun = 0; p.isIt = false;
+    th = PI + i * 2 * PI / n;                       // ring of spawns, everyone faces the centre
+    p.x = Math.cos(th) * s.R * 0.63; p.z = Math.sin(th) * s.R * 0.63; p.y = 0; p.gy = 0;
+    p.a = th - PI;
+    p.vx = p.vz = p.vy = 0; p.dashT = 0; p.dashCd = 0; p.stun = 0; p.isIt = false; p.itT = 0;
     p.sl = false; p.grab = -1; p.gcd = 0; p.coast = 0; p.jbuf = 0;
   }
 }
 function simStartRound(s) {
-  simResetPlayers(s);
   simPillars(s);
-  // solo practice: the idle dummy (P2) starts as IT, no clock, no countdown
-  s.p[s.cfg.solo ? 1 : (srand(s) < 0.5 ? 0 : 1)].isIt = true;
+  simResetPlayers(s);
+  // solo practice: the first dummy starts as IT, no clock, no countdown
+  s.p[s.cfg.solo ? 1 : Math.floor(srand(s) * s.p.length)].isIt = true;
   s.timeLeft = s.cfg.time; s.tagCd = 0.5;
   s.mode = s.cfg.solo ? 'play' : 'countdown'; s.mt = s.cfg.solo ? 1 : 0;
   s.lastCount = 4; s.lastSec = 99;
 }
 function simStartMatch(s) {
-  s.p[0].score = 0; s.p[1].score = 0; s.round = 1; s.winner = -1;
+  var i;
+  simSetN(s, s.cfg.solo ? s.cfg.n : 2);
+  for (i = 0; i < s.p.length; i++) s.p[i].score = 0;
+  s.round = 1; s.winner = -1;
   simStartRound(s);
 }
 function simToTitle(s) {
   s.mode = 'title'; s.mt = 0;
-  simResetPlayers(s); simPillars(s);
+  simSetN(s, s.cfg.solo ? s.cfg.n : 2);
+  simPillars(s); simResetPlayers(s);
 }
 
 function tryDash(s, i, fw, st) {
@@ -323,7 +349,7 @@ function stepP(s, i, bits, tdel, dt) {
   }
   if (p.grab >= 0 && p.dashCd > 0) p.dashCd -= dt;
 
-  var d = hyp(p.x, p.z), lim = R - 14;
+  var d = hyp(p.x, p.z), lim = s.R - 14;
   if (d > lim) {
     var nx = p.x / d, nz = p.z / d, dot = p.vx * nx + p.vz * nz;
     p.x = nx * lim; p.z = nz * lim;
@@ -375,34 +401,44 @@ function doShove(s, ri, ii) {
   s.ev.push({ t: 'shove', a: ri, b: ii, x: (it.x + runner.x) / 2, z: (it.z + runner.z) / 2 });
 }
 function collide(s) {
-  // clearly above/below each other (jumping over): no contact, no tag
-  if (Math.abs(s.p[0].y - s.p[1].y) > 40) return;
-  var a = s.p[0], b = s.p[1];
-  var dx = b.x - a.x, dz = b.z - a.z, d = hyp(dx, dz);
-  if (d < 28 && d > 0.001) {
-    var nx = dx / d, nz = dz / d, ov = (28 - d) / 2;
-    a.x -= nx * ov; a.z -= nz * ov; b.x += nx * ov; b.z += nz * ov;
-    if (s.tagCd <= 0) {
-      var ii = a.isIt ? 0 : 1, oi = 1 - ii;
-      if (s.p[oi].dashT > 0 && s.p[oi].stun <= 0) doShove(s, oi, ii);
-      else if (s.p[ii].stun <= 0) doTag(s, ii, oi);
+  var n = s.p.length, i, j, a, b, dx, dz, d, nx, nz, ov, ii, oi;
+  for (i = 0; i < n; i++) {
+    for (j = i + 1; j < n; j++) {
+      a = s.p[i]; b = s.p[j];
+      if (Math.abs(a.y - b.y) > 40) continue;   // clearly above/below each other: no contact, no tag
+      dx = b.x - a.x; dz = b.z - a.z; d = hyp(dx, dz);
+      if (d < 28 && d > 0.001) {
+        nx = dx / d; nz = dz / d; ov = (28 - d) / 2;
+        a.x -= nx * ov; a.z -= nz * ov; b.x += nx * ov; b.z += nz * ov;
+        if (s.tagCd <= 0 && (a.isIt || b.isIt)) {
+          ii = a.isIt ? i : j; oi = a.isIt ? j : i;
+          if (s.p[oi].dashT > 0 && s.p[oi].stun <= 0) doShove(s, oi, ii);
+          else if (s.p[ii].stun <= 0) doTag(s, ii, oi);
+        }
+      }
     }
   }
 }
+// lowest time spent as IT wins the round (tie: the one who is not IT right now)
 function endRound(s) {
-  var loser = s.p[0].isIt ? 0 : 1, winner = 1 - loser;
-  s.winner = winner;
-  s.p[winner].score++;
-  setStun(s.p[loser], 2.2, 1);
+  var i, w = 0, a, b;
+  for (i = 1; i < s.p.length; i++) {
+    a = s.p[i]; b = s.p[w];
+    if (a.itT < b.itT - 0.001 || (Math.abs(a.itT - b.itT) <= 0.001 && b.isIt && !a.isIt)) w = i;
+  }
+  s.winner = w;
+  s.p[w].score++;
+  for (i = 0; i < s.p.length; i++) if (s.p[i].isIt) setStun(s.p[i], 2.2, 1);
   s.mode = 'roundend'; s.mt = 0;
-  s.ev.push({ t: 'roundend', w: winner });
+  s.ev.push({ t: 'roundend', w: w });
 }
 
+var NOIN = { b: 0, t: 0 };
 function simStep(s, inp, dt) {
   if (s.mode == 'title') return;
   s.mt += dt;
-  var i, solo = s.cfg.solo;
-  for (i = 0; i < 2; i++) stepP(s, i, inp[i].b, inp[i].t, dt);
+  var i, solo = s.cfg.solo, q;
+  for (i = 0; i < s.p.length; i++) { q = inp[i] || NOIN; stepP(s, i, q.b, q.t, dt); }
   if (s.mode == 'countdown') {
     var n = Math.ceil(3 - s.mt);
     if (s.mt >= 3) { s.mode = 'play'; s.mt = 0; s.ev.push({ t: 'go' }); }
@@ -411,6 +447,7 @@ function simStep(s, inp, dt) {
     s.tagCd -= dt;
     collide(s);
     if (!solo) {
+      for (i = 0; i < s.p.length; i++) if (s.p[i].isIt) s.p[i].itT += dt;
       s.timeLeft -= dt;
       var sec = Math.ceil(s.timeLeft);
       if (sec <= 5 && sec != s.lastSec && sec > 0) { s.lastSec = sec; s.ev.push({ t: 'tick' }); }
@@ -453,6 +490,7 @@ function readIn(i) {
 
 // =============================================================== NET + ONLINE PLAY
 // Supabase Realtime Broadcast. The host owns the simulation; the guest sends inputs.
+// Online is 2 players for now: host = player 0, guest = player Net.me (1).
 //
 // Why the guest feels instant:
 //   PREDICTION      the guest runs its own player's physics locally every tick, so controls
@@ -460,11 +498,11 @@ function readIn(i) {
 //   RECONCILIATION  every host snapshot carries `ack` (last input the host applied). The guest
 //                   rebases its player onto the host state and replays the inputs the host has
 //                   not seen yet. Small differences are blended out instead of snapping.
-//   INTERPOLATION   the host's puppet is drawn INTERP_MS in the past, between two snapshots,
-//                   so 30 Hz updates look like smooth motion.
+//   INTERPOLATION   other players are drawn INTERP_MS in the past, between two snapshots,
+//                   so 20 Hz updates look like smooth motion.
 // Host side: guest inputs go through a tiny jitter buffer, one input per tick. One-shot
 // buttons (dash, jump) ride inside numbered inputs, so they are never lost or doubled.
-var INTERP_MS = 100;       // how far in the past the guest draws the host puppet (>= 2 snapshot intervals)
+var INTERP_MS = 100;       // how far in the past the guest draws other puppets (>= 2 snapshot intervals)
 
 // ---- message budget (this is what fixed "laggier and laggier, then freezes in a loop") ----------
 // Supabase Realtime free plan: 100 events/s per project. An event = one message sent from a
@@ -479,15 +517,19 @@ var NET_STATE_EVERY = 3;
 var NET_INPUT_EVERY = 4;
 var DP = [null, null];     // players as displayed this frame (predicted / interpolated on the guest)
 var Net = {
-  mode: 'local', role: 'local', channel: null, room: '', status: 'Local mode',
+  mode: 'local', role: 'local', me: 1, channel: null, room: '', status: 'Local mode',
   tk: 0, ticks: 0, pendingEvents: [],
   // host: guest input queue
   q: [], hseq: 0, used: 0, last: { b: 0, t: 0 }, rebuf: true, starve: 0,
   // guest: prediction + interpolation
   seq: 0, pending: [], pp: null, ps: null, err: { x: 0, z: 0, y: 0 }, snaps: [], off: null, joined: false,
   getInputs: function (s) {
-    if (this.mode == 'host') return [readIn(0), hostRemoteInput()];
-    return [readIn(0), s.cfg.solo ? { b: 0, t: 0 } : readIn(1)];
+    var a = [], i, n = s.p.length;
+    for (i = 0; i < n; i++) a.push({ b: 0, t: 0 });
+    a[0] = readIn(0);
+    if (this.mode == 'host') a[1] = hostRemoteInput();
+    else if (!s.cfg.solo && n > 1) a[1] = readIn(1);
+    return a;
   }
 };
 var OWN_EV = { dash: 1, jump: 1, land: 1, slide: 1, grab: 1, fling: 1 };
@@ -534,7 +576,7 @@ function sendState() {
 function predStep(ps, inp) {
   if (ps.mode == 'title') return;
   ps.mt += STEP;
-  stepP(ps, 1, inp.b, inp.t, STEP);
+  stepP(ps, Net.me, inp.b, inp.t, STEP);
   if (ps.mode == 'countdown' && ps.mt >= 3) { ps.mode = 'play'; ps.mt = 0; }
 }
 function clientTick() {
@@ -557,27 +599,32 @@ function sendInputs() {
   Net.channel.send({ type: 'broadcast', event: 'input', payload: { i: arr } });
 }
 function onSnapshot(inc) {
-  var now = new Date().getTime(), k, e, st = inc.tk * STEP * 1000, o = now - st, r = inc.p[0];
+  var now = new Date().getTime(), k, e, st = inc.tk * STEP * 1000, o = now - st, ps = [], q;
   // host clock -> local clock offset (tracks the fastest packets, drifts up slowly)
   if (Net.off === null || Math.abs(o - Net.off) > 500) Net.off = o;
   else if (o < Net.off) Net.off += (o - Net.off) * 0.3;
   else Net.off += (o - Net.off) * 0.02;
-  Net.snaps.push({ st: st, x: r.x, z: r.z, y: r.y, a: r.a, vx: r.vx, vz: r.vz });
+  for (k = 0; k < inc.p.length; k++) {
+    q = inc.p[k];
+    ps.push({ x: q.x, z: q.z, y: q.y, a: q.a, vx: q.vx, vz: q.vz });
+  }
+  Net.snaps.push({ st: st, p: ps });
   if (Net.snaps.length > 12) Net.snaps.shift();
   // authoritative state
   for (k in inc) if (k != 'ev' && k != 'tk' && k != 'ack') sim[k] = inc[k];
   // events: the guest plays its own actions from prediction, everything else from the host
   for (k = 0; k < (inc.ev || []).length; k++) {
     e = inc.ev[k];
-    if (!(OWN_EV[e.t] && e.i === 1)) sim.ev.push(e);
+    if (!(OWN_EV[e.t] && e.i === Net.me)) sim.ev.push(e);
   }
   reconcile(inc);
 }
 function reconcile(inc) {
-  var i, old = Net.pp, ox, oz, oy, np, rs, dx, dz, dy;
+  var i, old = Net.pp, ox, oz, oy, np, rs, rp, dx, dz, dy;
   while (Net.pending.length && Net.pending[0].s <= (inc.ack || 0)) Net.pending.shift();
-  np = JSON.parse(JSON.stringify(inc.p[1]));
-  rs = { mode: inc.mode, mt: inc.mt, pillars: inc.pillars, cfg: inc.cfg, ev: [], p: [inc.p[0], np] };
+  np = JSON.parse(JSON.stringify(inc.p[Net.me]));
+  rp = inc.p.slice(); rp[Net.me] = np;
+  rs = { mode: inc.mode, mt: inc.mt, R: inc.R, pillars: inc.pillars, cfg: inc.cfg, ev: [], p: rp };
   for (i = 0; i < Net.pending.length; i++) { predStep(rs, Net.pending[i]); rs.ev.length = 0; }
   if (old) {
     // keep what is on screen continuous: error = shown position before - corrected position now
@@ -589,22 +636,26 @@ function reconcile(inc) {
   Net.pp = np; Net.ps = rs;
 }
 function angDiff(a, b) { return Math.atan2(Math.sin(b - a), Math.cos(b - a)); }
+// interpolated state of every player (the guest's own entry is ignored by buildDP)
 function interpRemote() {
-  var b = Net.snaps, n = b.length, rt, i, A, B, f, dt;
+  var b = Net.snaps, n = b.length, rt, i, A, B, f = 0, dt = 0, out = [], j, a, c;
   if (!n || Net.off === null) return null;
   rt = new Date().getTime() - Net.off - INTERP_MS;
-  if (rt <= b[0].st) return b[0];
-  A = b[n - 1];
-  if (rt >= A.st) {
-    dt = Math.min(0.12, (rt - A.st) / 1000);   // snapshots late: extrapolate a little
-    return { x: A.x + A.vx * dt, z: A.z + A.vz * dt, y: A.y, a: A.a, vx: A.vx, vz: A.vz };
+  if (rt <= b[0].st) { A = B = b[0]; }
+  else if (rt >= b[n - 1].st) { A = B = b[n - 1]; dt = Math.min(0.12, (rt - A.st) / 1000); }   // late: extrapolate a little
+  else {
+    for (i = n - 2; i > 0; i--) if (b[i].st <= rt) break;
+    A = b[i]; B = b[i + 1];
+    f = (rt - A.st) / ((B.st - A.st) || 1);
   }
-  for (i = n - 2; i > 0; i--) if (b[i].st <= rt) break;
-  A = b[i]; B = b[i + 1];
-  if (hyp(B.x - A.x, B.z - A.z) > 150) return rt - A.st < B.st - rt ? A : B;   // teleport (round reset)
-  f = (rt - A.st) / ((B.st - A.st) || 1);
-  return { x: A.x + (B.x - A.x) * f, z: A.z + (B.z - A.z) * f, y: A.y + (B.y - A.y) * f,
-           a: A.a + angDiff(A.a, B.a) * f, vx: A.vx + (B.vx - A.vx) * f, vz: A.vz + (B.vz - A.vz) * f };
+  for (j = 0; j < A.p.length; j++) {
+    a = A.p[j]; c = B.p[j] || a;
+    if (dt) out.push({ x: a.x + a.vx * dt, z: a.z + a.vz * dt, y: a.y, a: a.a, vx: a.vx, vz: a.vz });
+    else if (hyp(c.x - a.x, c.z - a.z) > 150) out.push(f < 0.5 ? a : c);   // teleport (round reset)
+    else out.push({ x: a.x + (c.x - a.x) * f, z: a.z + (c.z - a.z) * f, y: a.y + (c.y - a.y) * f,
+                    a: a.a + angDiff(a.a, c.a) * f, vx: a.vx + (c.vx - a.vx) * f, vz: a.vz + (c.vz - a.vz) * f });
+  }
+  return out;
 }
 function mixP(base, o) {
   var c = {}, k;
@@ -612,15 +663,18 @@ function mixP(base, o) {
   for (k in o) c[k] = o[k];
   return c;
 }
-// players as drawn this frame. Local/host: the sim itself. Guest: predicted self + interpolated host
+function ensureVis(n) { while (vis.length < n) vis.push(mkVis()); }
+// players as drawn this frame. Local/host: the sim itself. Guest: predicted self + interpolated others
 function buildDP(dt) {
-  var r, f, e;
-  if (Net.mode != 'client' || !Net.pp || sim.mode == 'title') { DP[0] = sim.p[0]; DP[1] = sim.p[1]; return; }
+  var n = sim.p.length, i, r, f, e;
+  ensureVis(n);
+  DP.length = n;
+  if (Net.mode != 'client' || !Net.pp || sim.mode == 'title') { for (i = 0; i < n; i++) DP[i] = sim.p[i]; return; }
   r = interpRemote();
-  DP[0] = r ? mixP(sim.p[0], { x: r.x, z: r.z, y: r.y, a: r.a, vx: r.vx, vz: r.vz }) : sim.p[0];
+  for (i = 0; i < n; i++) DP[i] = (r && r[i] && i != Net.me) ? mixP(sim.p[i], r[i]) : sim.p[i];
   f = Math.exp(-dt * 12);
   e = Net.err; e.x *= f; e.z *= f; e.y *= f;
-  DP[1] = mixP(Net.pp, { x: Net.pp.x + e.x, z: Net.pp.z + e.z, y: Net.pp.y + e.y });
+  DP[Net.me] = mixP(Net.pp, { x: Net.pp.x + e.x, z: Net.pp.z + e.z, y: Net.pp.y + e.y });
 }
 
 // ---------------------------------------------------------------- connection
@@ -652,6 +706,7 @@ function openOnlineRoom(code, role) {
   if (code.length !== 6) { netStatus('Enter a 6-character room code.'); return; }
   netReset();
   Net.mode = role; Net.role = role; Net.room = code;
+  if (role == 'host') { sim.cfg.solo = false; sim.cfg.n = 2; simToTitle(sim); }   // online is 2 players for now
   setRoomUI(code); netStatus('Connecting to room ' + code + '...');
   var ch = sb.channel('puppet-tag-' + code, { config: { broadcast: { self: false } } });
   Net.channel = ch;
@@ -707,12 +762,12 @@ function mkVis() {
   return { lvx: 0, lvz: 0, phase: 0, moving: 0, kick: 0, flash: 0,
            hf: 0, hfv: 0, hl: 0, hlv: 0, df: 0, dfv: 0, dl: 0, dlv: 0, cr: 0 };
 }
-vis.push(mkVis()); vis.push(mkVis());
+ensureVis(MAXP);
 
 function updateVis(dt) {
   if (dt < 0.001) return;
   var i, p, v, ax, az, af, al, ca, sa, spd;
-  for (i = 0; i < 2; i++) {
+  for (i = 0; i < DP.length; i++) {
     p = DP[i]; v = vis[i];
     ca = Math.cos(p.a); sa = Math.sin(p.a);
     ax = (p.vx - v.lvx) / dt; az = (p.vz - v.lvz) / dt;
@@ -790,7 +845,8 @@ function handleEvents() {
     } else if (e.t == 'tag') {
       burst3(e.x, e.z, 40, 26, 'rgb(255,80,80)', 220, 0.7, 5);
       burst3(e.x, e.z, 40, 12, 'rgb(255,230,120)', 180, 0.6, 4);
-      vis[e.b].flash = 1; shake = 10;
+      if (vis[e.b]) vis[e.b].flash = 1;
+      shake = 10;
       setMsg('TAG!', '#ff5252');
       beep(180, 0.25, 'square', 0.07); beep(90, 0.3, 'sawtooth', 0.06);
     } else if (e.t == 'shove') {
@@ -952,7 +1008,7 @@ function drawHands(pi, p, v, horizonShift) {
 }
 
 function renderView(pi) {
-  var p = DP[pi], o = DP[1 - pi], v = vis[pi], vo = vis[1 - pi];
+  var p = DP[pi], v = vis[pi], n = DP.length;
   var i, k;
   var flopAmt = p.stun > 0 ? Math.sin(PI * (1 - p.stun / p.stunMax)) : 0;
   var bob = Math.abs(Math.sin(v.phase)) * 3 * v.moving * (p.y <= p.gy + 0.5 ? 1 : 0);
@@ -960,6 +1016,7 @@ function renderView(pi) {
   var horizon = VH / 2 + flopAmt * 70;
   var focal = F0 * (1 - 0.18 * v.kick);
   var depth = [];
+  var AR = sim.R, fog = AR * 1.67;
   var viewOffset = (Net.mode == 'host' || Net.mode == 'client') ? 0 : pi * VW;
 
   ctx.save();
@@ -978,7 +1035,7 @@ function renderView(pi) {
 
   // one vertical strip of wall or pillar, hgt = its height above the floor
   function strip(ci, tp, base, hgt) {
-    var shade = clamp(1.1 - tp / 450, 0.3, 1);
+    var shade = clamp(1.1 - tp / fog, 0.3, 1);
     var top = horizon - (hgt - eye) * focal / tp;
     var bot = horizon + eye * focal / tp;
     ctx.fillStyle = 'rgb(' + Math.round(base[0] * shade) + ',' + Math.round(base[1] * shade) + ',' + Math.round(base[2] * shade) + ')';
@@ -998,7 +1055,7 @@ function renderView(pi) {
     var ang = p.a + a;
     var dx = Math.cos(ang), dz = Math.sin(ang);
     var bt = p.x * dx + p.z * dz;
-    var cc = p.x * p.x + p.z * p.z - R * R;
+    var cc = p.x * p.x + p.z * p.z - AR * AR;
     var tmin = -bt + Math.sqrt(Math.max(0, bt * bt - cc));
     var u = Math.atan2(p.z + dz * tmin, p.x + dx * tmin);
     var alt = Math.floor((u + PI) * 10 / PI) & 1;
@@ -1015,7 +1072,7 @@ function renderView(pi) {
         if (t > 0 && t < tmin) hits.push({ t: t, k: k });
       }
     }
-    hits.sort(function (m, n) { return n.t - m.t; });
+    hits.sort(function (m, n2) { return n2.t - m.t; });
     for (hi = 0; hi < hits.length; hi++) {
       var pk = pillars[hits[hi].k];
       var pu = Math.atan2(p.z + dz * hits[hi].t - pk.z, p.x + dx * hits[hi].t - pk.x);
@@ -1029,36 +1086,46 @@ function renderView(pi) {
     }
   }
 
-  // opponent sprite
-  var ddx = o.x - p.x, ddz = o.z - p.z;
+  // opponent sprites, far to near
   var ca = Math.cos(p.a), sa = Math.sin(p.a);
-  var dF = ddx * ca + ddz * sa, dR = -ddx * sa + ddz * ca;
-  var onScreen = false;
-  if (dF > 6) {
-    var s = focal / dF;
-    var sxc = VW / 2 + dR * s;
-    var groundY = horizon + (eye - o.y) * s;
-    var half = 28 * s;
-    if (sxc + half > 0 && sxc - half < VW) onScreen = true;
-    var c0 = Math.max(0, Math.floor((sxc - half) / COLW));
-    var c1 = Math.min(NCOL - 1, Math.floor((sxc + half) / COLW));
-    var da = o.a - p.a;
-    var info = { cLat: Math.cos(da), cFwd: Math.sin(da), front: Math.cos(da) < 0,
-                 shift: Math.sin(da) * 4, k: clamp(eye / dF * 1.2, 0.08, 0.6), air: o.y - o.gy };
-    var run = -1, ci;
-    for (ci = c0; ci <= c1 + 1; ci++) {
-      var seen = ci <= c1 && depth[ci] > dF;
-      if (seen && run < 0) run = ci;
-      if (!seen && run >= 0) {
-        ctx.save();
-        ctx.beginPath(); ctx.rect(run * COLW, 0, (ci - run) * COLW, VH); ctx.clip();
-        ctx.translate(sxc, groundY);
-        ctx.scale(s, s);
-        drawBody(1 - pi, o, vo, info);
-        ctx.restore();
-        run = -1;
+  var opps = [], oj, oo, ddx, ddz, nearest = null, offs = [];
+  for (oj = 0; oj < n; oj++) {
+    if (oj == pi) continue;
+    oo = DP[oj];
+    ddx = oo.x - p.x; ddz = oo.z - p.z;
+    opps.push({ j: oj, o: oo, dF: ddx * ca + ddz * sa, dR: -ddx * sa + ddz * ca, d: hyp(ddx, ddz) });
+  }
+  opps.sort(function (m, n2) { return n2.dF - m.dF; });
+  for (k = 0; k < opps.length; k++) {
+    var op = opps[k], o = op.o, dF = op.dF, dR = op.dR, onScreen = false;
+    if (!nearest || op.d < nearest.d) nearest = op;
+    if (dF > 6) {
+      var s = focal / dF;
+      var sxc = VW / 2 + dR * s;
+      var groundY = horizon + (eye - o.y) * s;
+      var half = 28 * s;
+      if (sxc + half > 0 && sxc - half < VW) onScreen = true;
+      var c0 = Math.max(0, Math.floor((sxc - half) / COLW));
+      var c1 = Math.min(NCOL - 1, Math.floor((sxc + half) / COLW));
+      var da = o.a - p.a;
+      var info = { cLat: Math.cos(da), cFwd: Math.sin(da), front: Math.cos(da) < 0,
+                   shift: Math.sin(da) * 4, k: clamp(eye / dF * 1.2, 0.08, 0.6), air: o.y - o.gy };
+      var run = -1, ci;
+      for (ci = c0; ci <= c1 + 1; ci++) {
+        var seen = ci <= c1 && depth[ci] > dF;
+        if (seen && run < 0) run = ci;
+        if (!seen && run >= 0) {
+          ctx.save();
+          ctx.beginPath(); ctx.rect(run * COLW, 0, (ci - run) * COLW, VH); ctx.clip();
+          ctx.translate(sxc, groundY);
+          ctx.scale(s, s);
+          drawBody(op.j, o, vis[op.j], info);
+          ctx.restore();
+          run = -1;
+        }
       }
     }
+    if (!onScreen) offs.push(op);
   }
 
   // particles
@@ -1087,7 +1154,6 @@ function renderView(pi) {
   }
 
   // HUD
-  var ocol = COLS[1 - pi];
   if (p.isIt) {
     ctx.strokeStyle = 'rgba(255,50,50,' + (0.6 + 0.3 * Math.sin(clock * 8)) + ')';
     ctx.lineWidth = 8;
@@ -1099,6 +1165,7 @@ function renderView(pi) {
     ctx.fillStyle = k < p.score ? sh(COLS[pi], 0.2) : '#2c3e50'; ctx.fill();
     ctx.strokeStyle = '#7f8c8d'; ctx.lineWidth = 1; ctx.stroke();
   }
+  if (!sim.cfg.solo) text('IT time ' + p.itT.toFixed(1) + 's', 14, 64, 12, '#9fb3c8', 'left');
   if (sim.mode == 'play' || sim.mode == 'countdown') {
     text(p.isIt ? 'TAG THEM!' : 'RUN!', VW / 2, 70, 22, p.isIt ? '#ff5252' : '#2ecc71');
   }
@@ -1113,15 +1180,15 @@ function renderView(pi) {
   text('dash', VW / 2, VH - 28, 11, '#aaa');
   // speed readout (handy for finding techniques)
   text('spd ' + Math.round(hyp(p.vx, p.vz)), 14, VH - 14, 13, '#9fb3c8', 'left');
-  // opponent arrow + distance
-  var dist = Math.round(hyp(ddx, ddz) / 10);
-  text((sim.cfg.solo ? 'dummy ' : 'opp ') + dist + 'm', VW - 14, VH - 14, 13, sh(ocol, 0.3), 'right');
-  if (!onScreen) {
-    var right = dR > 0;
-    var ax = right ? VW - 20 : 20;
-    if (right) poly([ax - 14, VH / 2 - 14, ax + 8, VH / 2, ax - 14, VH / 2 + 14], sh(ocol, 0.2));
-    else poly([ax + 14, VH / 2 - 14, ax - 8, VH / 2, ax + 14, VH / 2 + 14], sh(ocol, 0.2));
-    if (dF <= 6) text('BEHIND', VW / 2, VH / 2 + 80, 14, sh(ocol, 0.2));
+  // nearest opponent distance
+  if (nearest) text((sim.cfg.solo ? 'dummy ' : 'opp ') + Math.round(nearest.d / 10) + 'm', VW - 14, VH - 14, 13, sh(COLS[nearest.j], 0.3), 'right');
+  // arrows for opponents that are out of view, stacked at the screen edges
+  var ai, ay, ax, ro;
+  for (ai = 0; ai < offs.length; ai++) {
+    ro = offs[ai];
+    ay = VH / 2 - (offs.length - 1) * 16 + ai * 32;
+    if (ro.dR > 0) { ax = VW - 20; poly([ax - 14, ay - 12, ax + 8, ay, ax - 14, ay + 12], sh(COLS[ro.j], 0.2)); }
+    else { ax = 20; poly([ax + 14, ay - 12, ax - 8, ay, ax + 14, ay + 12], sh(COLS[ro.j], 0.2)); }
   }
   // events / state text
   if (msg.t < 0.9) {
@@ -1130,8 +1197,8 @@ function renderView(pi) {
     ctx.globalAlpha = 1;
   }
   if (sim.mode == 'countdown') {
-    var n = Math.max(1, Math.ceil(3 - sim.mt));
-    text(n, VW / 2, VH / 2 - 20, 80, '#fff');
+    var cn = Math.max(1, Math.ceil(3 - sim.mt));
+    text(cn, VW / 2, VH / 2 - 20, 80, '#fff');
   } else if (sim.mode == 'play' && sim.mt < 0.7 && !sim.cfg.solo) {
     text('GO!', VW / 2, VH / 2 - 20, 80, '#2ecc71');
   } else if (sim.mode == 'roundend') {
@@ -1140,9 +1207,21 @@ function renderView(pi) {
   } else if (sim.mode == 'matchend') {
     ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 0, VW, VH);
     text(sim.winner == pi ? 'VICTORY' : 'DEFEAT', VW / 2, VH / 2, 54, sim.winner == pi ? '#2ecc71' : '#ff5252');
-    text(DP[pi].score + ' - ' + DP[1 - pi].score, VW / 2, VH / 2 + 40, 26, '#fff');
+    text(n == 2 ? p.score + ' - ' + DP[1 - pi].score : p.score + ' rounds won', VW / 2, VH / 2 + 40, 26, '#fff');
   }
   ctx.restore();
+}
+
+// scoreboard for 3+ players in a real match
+function drawBoard() {
+  var i, y = 56, p;
+  ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(W - 140, y - 16, 136, DP.length * 16 + 6);
+  for (i = 0; i < DP.length; i++) {
+    p = DP[i];
+    ctx.fillStyle = sh(COLS[i], 0); ctx.fillRect(W - 134, y - 9, 9, 9);
+    text(NAMES[i] + '  ' + p.score + '  ' + p.itT.toFixed(0) + 's' + (p.isIt ? ' IT' : ''), W - 120, y, 12, p.isIt ? '#ff6666' : '#ddd', 'left');
+    y += 16;
+  }
 }
 
 function drawTitle() {
@@ -1150,7 +1229,7 @@ function drawTitle() {
   g.addColorStop(0, '#0a1020'); g.addColorStop(1, '#2a3f58');
   ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
   text('PUPPET TAG', W / 2, 70, 60, '#fff');
-  text('first person - split screen or solo practice', W / 2, 98, 15, '#aaa');
+  text('first person - split screen, solo practice or online', W / 2, 98, 15, '#aaa');
   text('P1', 250, 140, 22, sh(COLS[0], 0.2));
   text('W / S  move', 250, 162, 14, '#ddd');
   text('Q / E  turn  (or mouse)', 250, 179, 14, '#ddd');
@@ -1167,14 +1246,16 @@ function drawTitle() {
   text('/  jump', 710, 230, 14, '#ddd');
   text(';  slide (hold)', 710, 247, 14, '#ddd');
   text("'  grab pillar (hold)", 710, 264, 14, '#ddd');
-  text('Whoever is IT when the clock runs out loses the round. Touch someone while IT to tag.', W / 2, 300, 14, '#bbb');
-  text('Dash into IT to shove them. Grab a pillar, spin up, release to fling where you look.', W / 2, 319, 14, '#bbb');
-  var solo = sim.cfg.solo;
-  text('[G] mode: ' + (solo ? 'SOLO PRACTICE (idle dummy, no clock)' : '2 PLAYER SPLIT SCREEN'), W / 2, 352, 17, '#f1c40f');
-  text('[L] mouse look (P1): ' + (sim.cfg.mouse ? 'on - click the game to capture' : 'off'), W / 2, 376, 17, '#f1c40f');
-  text('[T] round time: ' + (solo ? '-' : sim.cfg.time + 's'), 250, 404, 15, solo ? '#777' : '#f1c40f');
-  text('[M] first to: ' + (solo ? '-' : sim.cfg.wins), 710, 404, 15, solo ? '#777' : '#f1c40f');
-  text('[B] pillars: ' + (sim.cfg.pillars ? 'on' : 'off'), W / 2, 404, 15, '#f1c40f');
+  text('Least time spent as IT when the clock ends wins the round. Touch someone while IT to tag.', W / 2, 296, 14, '#bbb');
+  text('Dash into IT to shove them. Grab a pillar, spin up, release to fling where you look.', W / 2, 314, 14, '#bbb');
+  var solo = sim.cfg.solo, on = Net.mode != 'local';
+  text('[G] mode: ' + (on ? 'ONLINE (2 players)' : (solo ? 'SOLO PRACTICE (idle dummies, no clock)' : '2 PLAYER SPLIT SCREEN')), W / 2, 346, 17, '#f1c40f');
+  text('[L] mouse look (P1): ' + (sim.cfg.mouse ? 'on - click the game to capture' : 'off'), W / 2, 368, 17, '#f1c40f');
+  text('[T] round time: ' + (solo ? '-' : sim.cfg.time + 's'), 250, 394, 15, solo ? '#777' : '#f1c40f');
+  text('[B] pillars: ' + (sim.cfg.pillars ? 'on' : 'off'), W / 2, 394, 15, '#f1c40f');
+  text('[M] first to: ' + (solo ? '-' : sim.cfg.wins), 710, 394, 15, solo ? '#777' : '#f1c40f');
+  text('[N] players: ' + (solo && !on ? sim.cfg.n + ' (you + ' + (sim.cfg.n - 1) + ' dummies)' : '2'), 250, 416, 15, solo && !on ? '#f1c40f' : '#777');
+  text('[V] map: ' + MAPDEFS[sim.cfg.map].name, 710, 416, 15, '#f1c40f');
   ctx.globalAlpha = 0.6 + 0.4 * Math.sin(clock * 4);
   text(Net.mode == 'client' ? 'Waiting for host to start...' : 'Press SPACE to start', W / 2, 455, 26, Net.mode == 'client' ? '#f1c40f' : '#2ecc71');
   ctx.globalAlpha = 1;
@@ -1186,9 +1267,9 @@ function render() {
   if (sim.mode == 'title') { drawTitle(); return; }
   if (Net.mode == 'host' || Net.mode == 'client') {
     setView(960, 90);
-    renderView(Net.mode == 'client' ? 1 : 0);
-    ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(W / 2 - 105, 0, 210, 22);
-    text(Net.mode == 'host' ? 'ONLINE  |  HOST' : 'ONLINE  |  PLAYER 2', W / 2, 16, 13, '#9fb3c8');
+    renderView(Net.mode == 'client' ? Net.me : 0);
+    ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(W / 2 - 150, 0, 300, 22);
+    text((Net.mode == 'host' ? 'ONLINE  |  HOST' : 'ONLINE  |  PLAYER 2') + '  |  ' + Net.room, W / 2, 16, 13, '#9fb3c8');
   } else if (sim.cfg.solo) {
     setView(960, 90);
     renderView(0);
@@ -1204,6 +1285,7 @@ function render() {
     text(secs, W / 2, 34, 34, (secs <= 5 && sim.mode == 'play') ? '#ff5252' : '#fff');
     text('Round ' + sim.round, W / 2, 12, 11, '#7f8c8d');
   }
+  if (!sim.cfg.solo && DP.length > 2) drawBoard();
   if (sim.cfg.mouse && !Input.locked && !paused && sim.mode != 'matchend') {
     text(canLock ? 'click to capture mouse' : 'drag the mouse to turn', W / 2, H - 50, 14, '#f1c40f');
   }
@@ -1218,13 +1300,29 @@ function render() {
 var sim = simNew();
 simToTitle(sim);
 
+// the canvas keeps its internal 960x480 and is scaled to the window; the info panel is only shown
+// on the title screen so the game itself gets the whole window
+var uiEl = document.getElementById('ui'), uiShown = true;
+function fit() {
+  var h = uiShown ? uiEl.offsetHeight : 0;
+  var w = Math.max(320, Math.min(window.innerWidth - 12, (window.innerHeight - h - 16) * 2));
+  cv.style.width = w + 'px';
+  cv.style.height = (w / 2) + 'px';
+}
+function syncUI() {
+  var show = sim.mode == 'title';
+  if (show != uiShown) { uiShown = show; uiEl.style.display = show ? 'block' : 'none'; fit(); }
+}
+window.onresize = fit;
+fit();
+
 function exitLock() {
   var d = document;
   if (d.exitPointerLock) d.exitPointerLock();
   else if (d.mozExitPointerLock) d.mozExitPointerLock();
 }
 function onPress(k) {
-  var i, j;
+  var i, j, on = Net.mode != 'local';
   if (k == 27) { paused = false; exitLock(); Input.mx = 0; simToTitle(sim); return; }
   if (sim.mode == 'title') {
     if (Net.mode == 'client') return;
@@ -1232,7 +1330,9 @@ function onPress(k) {
     else if (k == 84) sim.cfg.time = TIMES[(TIMES.indexOf(sim.cfg.time) + 1) % TIMES.length];
     else if (k == 77) sim.cfg.wins = WINS[(WINS.indexOf(sim.cfg.wins) + 1) % WINS.length];
     else if (k == 66) { sim.cfg.pillars = !sim.cfg.pillars; simPillars(sim); }
-    else if (k == 71) sim.cfg.solo = !sim.cfg.solo;
+    else if (k == 86) { sim.cfg.map = (sim.cfg.map + 1) % MAPDEFS.length; simToTitle(sim); }
+    else if (k == 71 && !on) { sim.cfg.solo = !sim.cfg.solo; simToTitle(sim); }
+    else if (k == 78 && !on && sim.cfg.solo) { sim.cfg.n = sim.cfg.n >= MAXP ? 2 : sim.cfg.n + 1; simToTitle(sim); }
     else if (k == 76) sim.cfg.mouse = !sim.cfg.mouse;
     return;
   }
@@ -1332,6 +1432,7 @@ setInterval(function () {
     updateVis(Math.min(dt, 0.05));
     updateParts(dt);
   }
+  syncUI();
   render();
 }, 16);
 </script>
