@@ -14,13 +14,13 @@
 <canvas id="c" width="960" height="480"></canvas>
 <div id="ui">
 <div id="onlinePanel" style="max-width:960px;margin:10px auto 8px;padding:10px;border:1px solid #34495e;background:#101923;color:#ddd;font:13px monospace;text-align:center">
-  <div style="font-size:15px;color:#f1c40f;margin-bottom:8px">ONLINE PLAY (BETA, 2 players)</div>
+  <div style="font-size:15px;color:#f1c40f;margin-bottom:8px">ONLINE PLAY (up to 6 players)</div>
   <button id="createRoom">Create room</button>
   <span style="padding:0 8px;color:#777">or</span>
   <input id="roomCode" maxlength="6" placeholder="ROOM CODE" autocomplete="off" style="width:110px;text-transform:uppercase;text-align:center;font: bold 15px monospace;padding:5px;background:#080d13;color:#fff;border:1px solid #526579">
   <button id="joinRoom">Join room</button>
   <div id="netStatus" style="margin-top:8px;color:#9fb3c8">Local mode is unchanged. Create or join a room to play online.</div>
-  <div id="roomActions" style="margin-top:6px;display:none">Room code: <strong id="roomLabel" style="color:#2ecc71;letter-spacing:2px"></strong> — share this code with your opponent. <button id="leaveRoom">Leave room</button></div>
+  <div id="roomActions" style="margin-top:6px;display:none">Room code: <strong id="roomLabel" style="color:#2ecc71;letter-spacing:2px"></strong> — share this code with your friends. <button id="leaveRoom">Leave room</button></div>
 </div>
 <p>P1: W/S move, Q/E or mouse turn, A/D strafe, F dash, Space jump, Shift slide (hold), C grab pillar (hold)</p>
 <p>P2: Up/Down move, Left/Right turn, , / . strafe, Enter dash, / jump, ; slide (hold), ' grab (hold) &nbsp;|&nbsp; P pause, R reset (solo), Esc title, F11 fullscreen</p>
@@ -52,8 +52,8 @@
    ===================================================================================
    WHAT THIS IS
      Single-file first-person puppet tag game: local split screen (2 players), solo practice
-     (1 human + up to 5 idle dummies), and online 2-player (host-authoritative) over Supabase
-     Realtime Broadcast.
+     (1 human + up to 5 idle dummies), and online play for up to 6 players (host-authoritative,
+     WebRTC data channels, Supabase Realtime only for signalling + a relay fallback).
 
    HOW THE SCRIPT IS ORGANISED (in file order)
      SIM     pure rules at a fixed 60 Hz. No drawing, no keyboard, no Math.random. State is plain
@@ -62,8 +62,9 @@
              built from MAPDEFS / mapPillars() by simPillars(). Spawns sit on a ring of radius
              0.63 * R, everyone facing the centre.
      INPUT   keyboard + mouse -> one input per player: { b: key bitmask, t: turn delta (rad) }.
-     NET     host runs SIM and broadcasts snapshots. The guest predicts its own player (index
-             Net.me) and interpolates every other player. Details in the NET section comment.
+     NET     the host runs SIM for everyone and sends each guest a compact snapshot; guests send
+             inputs. Each guest predicts its own player (index Net.me, assigned by the host in
+             every snapshot as `you`) and interpolates everyone else. Details in the NET comment.
      VIS     local-only eye candy (hand springs, particles, shake). Never part of networked state.
      RENDER  raycaster. IMPORTANT: render/vis code must read players through DP[] ("displayed
              players"), never sim.p directly. On the guest DP[] holds predicted/interpolated copies.
@@ -90,28 +91,31 @@
          skipped while the channel is not joined; stale queued events are capped.
      v4  N-player sim (up to 6), map as data (two maps), multi-opponent renderer, IT-time scoring,
          window-fitted canvas and collapsible UI. Online is still 2 players; the guest uses Net.me.
+     v5  online for up to 6 players: WebRTC star (host <-> each guest) with Supabase used only
+         for signalling, lobby, compact per-guest snapshots, ping display, drop handling, and a
+         relay fallback through Supabase for guests whose direct connection fails.
 
-   PLANNED NEXT
-     Peer-to-peer transport for more than 2 players online. Keep the host-authoritative star:
-     the host runs simStep and each guest sends inputs. Needed changes:
-       - Net.getInputs: one remote queue per guest (today a single queue feeds player index 1).
-       - Net.me per client (today the constant 1); host assigns indices on join.
-       - Online lobby start: sim.cfg.n = number of connected players (today forced to 2).
-       - Transport: WebRTC data channels, with Supabase used only for signalling (room code +
-         offer/answer/ICE). Expect to need a TURN fallback for some NATs. Send compact snapshots
-         (round positions, send only changed fields) since the host sends to up to 5 clients.
-       - Broadcast through Supabase cannot carry 6 players (events/s grow with senders x members).
+   NEXT IDEAS
+     - Test with friends on different networks. If direct connections fail (strict NATs), add a
+       TURN server to ICE_SERVERS; a free tier from a TURN provider is enough for friends.
+     - Bots to fill empty slots, more maps (MAPDEFS + mapPillars), names/colours, kick, rematch
+       without leaving the room.
 
-   TESTING WITHOUT SUPABASE
-     Stub window.supabase.createClient with an in-page fake channel (on / subscribe / send /
-     state) and relay messages between two pages, adding latency and jitter. Local N-player
-     testing needs no network at all: Solo mode, [N] picks 2-6 players (the rest are idle dummies).
+   TESTING
+     Local N-player testing needs no network: Solo, [N] picks 2-6 players (rest are idle dummies).
+     Online: open the page in several windows/devices, Create room in one, Join in the others.
+     To test the relay fallback, disable WebRTC on a guest (or block UDP); after about 8 s it
+     switches to the relay and the status line says so.
 
    KNOWN LIMITS
      - Tags are decided by the host, so the guest sees them one network trip late.
      - The guest sees other puppets about INTERP_MS (100 ms) in the past by design.
      - Guest prediction does not model player-vs-player pushing; the host corrects it smoothly.
      - Pillars are drawn at wall height even though their gameplay height is pk.h.
+     - The host tab must stay visible: browsers throttle background tabs and the sim slows down.
+     - The relay fallback broadcasts every message to everyone in the room, so use it for 2
+       players only. Joining is only possible from the lobby (title screen), not mid-match.
+     - Online matches cannot be paused.
    =================================================================================== */
 var cv = document.getElementById('c');
 var ctx = cv.getContext('2d');
@@ -154,7 +158,7 @@ function mkP() {
            sl: false, grab: -1, gAng: 0, gR: 0, gL: 0, gcd: 0, coast: 0, jbuf: 0 };
 }
 function simNew() {
-  return { mode: 'title', mt: 0, cfg: { time: 30, wins: 3, pillars: true, solo: false, mouse: true, n: 2, map: 0 },
+  return { mode: 'title', mt: 0, cfg: { time: 30, wins: 3, pillars: true, solo: false, mouse: true, n: 2, map: 0, online: false },
            round: 1, timeLeft: 30, tagCd: 0, lastCount: 4, lastSec: 99, seed: 12345,
            winner: -1, R: 270, p: [mkP(), mkP()], pillars: [], ev: [] };
 }
@@ -200,14 +204,14 @@ function simStartRound(s) {
 }
 function simStartMatch(s) {
   var i;
-  simSetN(s, s.cfg.solo ? s.cfg.n : 2);
+  simSetN(s, s.cfg.solo || s.cfg.online ? s.cfg.n : 2);
   for (i = 0; i < s.p.length; i++) s.p[i].score = 0;
   s.round = 1; s.winner = -1;
   simStartRound(s);
 }
 function simToTitle(s) {
   s.mode = 'title'; s.mt = 0;
-  simSetN(s, s.cfg.solo ? s.cfg.n : 2);
+  simSetN(s, s.cfg.solo || s.cfg.online ? s.cfg.n : 2);
   simPillars(s); simResetPlayers(s);
 }
 
@@ -489,89 +493,292 @@ function readIn(i) {
 }
 
 // =============================================================== NET + ONLINE PLAY
-// Supabase Realtime Broadcast. The host owns the simulation; the guest sends inputs.
-// Online is 2 players for now: host = player 0, guest = player Net.me (1).
+// Star topology over WebRTC data channels. The host runs the simulation (simStep) for everybody;
+// each guest sends inputs to the host and receives snapshots back. Supabase Realtime is only the
+// SIGNALLING channel (room code, offer / answer / ICE, lobby) plus a RELAY fallback for a guest whose
+// direct connection cannot be established within RELAY_AFTER_MS.
+//   guest -> host   {i:[[seq,bits,turn],...], pt, pg}   ~15/s. The last 16 inputs are resent every
+//                   packet, so a lost packet costs nothing. pt/pg = ping probe / measured ping.
+//   host -> guest   one compact snapshot ~20/s: `you` (your player index), `ack` (last input the
+//                   host applied), `f` (your full player), `o` (every player, compact arrays, see
+//                   PF), `pe/pd` (ping echo), plus clock, round state and events.
+// Data channels are unordered with no retransmits: stale data is worthless, the next one replaces it.
 //
-// Why the guest feels instant:
+// Why a guest feels instant:
 //   PREDICTION      the guest runs its own player's physics locally every tick, so controls
 //                   respond immediately. Each tick's input gets a sequence number.
-//   RECONCILIATION  every host snapshot carries `ack` (last input the host applied). The guest
-//                   rebases its player onto the host state and replays the inputs the host has
-//                   not seen yet. Small differences are blended out instead of snapping.
-//   INTERPOLATION   other players are drawn INTERP_MS in the past, between two snapshots,
-//                   so 20 Hz updates look like smooth motion.
-// Host side: guest inputs go through a tiny jitter buffer, one input per tick. One-shot
+//   RECONCILIATION  every snapshot carries `ack`. The guest rebases its player onto the host state
+//                   and replays the inputs the host has not seen yet. Small differences are
+//                   blended out instead of snapping.
+//   INTERPOLATION   other players are drawn INTERP_MS in the past, between two snapshots.
+// Host side: each guest's inputs go through a tiny jitter buffer, one input per tick. One-shot
 // buttons (dash, jump) ride inside numbered inputs, so they are never lost or doubled.
-var INTERP_MS = 100;       // how far in the past the guest draws other puppets (>= 2 snapshot intervals)
+//
+// Lobby: guests can join while the host is on the title screen. Player index = join order
+// (host = 0). A guest that drops mid-match keeps its slot and becomes an idle puppet; slots are
+// recompacted when the host returns to the title screen.
+//
+// Bandwidth (host upload): measured ~430 bytes per snapshot at 4 players (~600 at 6), 20/s per guest
+// -> roughly 12 KB/s per guest, ~60 KB/s (0.5 Mbps) for a full 6-player room. Supabase only sees signalling,
+// so its 100 events/s limit no longer matters (it still does for relay-mode guests).
+var INTERP_MS = 100;        // how far in the past a guest draws other puppets (>= 2 snapshot intervals)
+var NET_STATE_EVERY = 3;    // host snapshots: 60 / 3 = 20 per second per guest
+var NET_INPUT_EVERY = 4;    // guest inputs:   60 / 4 = 15 per second
+var RELAY_AFTER_MS = 8000;  // no direct connection after this long -> use the Supabase relay
+var DROP_MS = 6000;         // no packets for this long -> the other side is gone
+// STUN finds each player's public address. Strict NATs may also need a TURN server: add one here, e.g.
+// { urls: 'turn:your.turn.server:3478', username: '...', credential: '...' }
+var ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }];
+var DP = [null, null];      // players as displayed this frame (predicted / interpolated on a guest)
 
-// ---- message budget (this is what fixed "laggier and laggier, then freezes in a loop") ----------
-// Supabase Realtime free plan: 100 events/s per project. An event = one message sent from a
-// client OR delivered to a client, and the connection is dropped when the project exceeds it.
-// Events/s ~= (host sends + guest sends) x 2 for a two-player room.
-//   host snapshots: 60 / NET_STATE_EVERY  -> 20/s
-//   guest inputs:   60 / NET_INPUT_EVERY  -> 15/s      total (20 + 15) x 2 = 70 events/s
-// If you change these, redo the arithmetic. INTERP_MS must stay >= 2 snapshot intervals
-// (2 x 1000 * NET_STATE_EVERY / 60 ms), and the guest resends its last 16 inputs in every
-// packet, so NET_INPUT_EVERY above ~8 would start to lose inputs.
-var NET_STATE_EVERY = 3;
-var NET_INPUT_EVERY = 4;
-var DP = [null, null];     // players as displayed this frame (predicted / interpolated on the guest)
+// player fields on the wire. PF = what everybody else needs, FF = every field (your own player)
+var PF = ['x', 'z', 'y', 'vx', 'vz', 'gy', 'a', 'dashT', 'stun', 'stunMax', 'stunDir', 'isIt', 'sl', 'grab', 'score', 'itT'];
+var FF = PF.concat(['vy', 'dashCd', 'dashX', 'dashZ', 'gAng', 'gR', 'gL', 'gcd', 'coast', 'jbuf']);
+var BOOLF = { isIt: 1, sl: 1 };
+function r2(v) { return Math.round(v * 100) / 100; }
+function ts() { return new Date().getTime(); }
+function packP(p, F) {
+  var a = [], i, v;
+  for (i = 0; i < F.length; i++) { v = p[F[i]]; a.push(typeof v == 'boolean' ? (v ? 1 : 0) : r2(v)); }
+  return a;
+}
+function unpackP(p, a, F) {
+  var i;
+  for (i = 0; i < F.length; i++) p[F[i]] = BOOLF[F[i]] ? a[i] === 1 : a[i];
+}
+
 var Net = {
-  mode: 'local', role: 'local', me: 1, channel: null, room: '', status: 'Local mode',
-  tk: 0, ticks: 0, pendingEvents: [],
-  // host: guest input queue
-  q: [], hseq: 0, used: 0, last: { b: 0, t: 0 }, rebuf: true, starve: 0,
+  mode: 'local', role: 'local', me: 1, id: '', channel: null, room: '', status: 'Local mode',
+  tk: 0, ticks: 0, pendingEvents: [], joined: false,
+  // host: one record per guest (see hostJoin)
+  g: [],
+  // guest: connection
+  pc: null, dc: null, ice: [], relayOn: false, relayTimer: 0, joinTimer: 0, gotSnap: false, lastRx: 0, ping: 0,
   // guest: prediction + interpolation
-  seq: 0, pending: [], pp: null, ps: null, err: { x: 0, z: 0, y: 0 }, snaps: [], off: null, joined: false,
+  seq: 0, pending: [], pp: null, ps: null, err: { x: 0, z: 0, y: 0 }, snaps: [], off: null,
   getInputs: function (s) {
-    var a = [], i, n = s.p.length;
+    var a = [], i, n = s.p.length, g;
     for (i = 0; i < n; i++) a.push({ b: 0, t: 0 });
     a[0] = readIn(0);
-    if (this.mode == 'host') a[1] = hostRemoteInput();
-    else if (!s.cfg.solo && n > 1) a[1] = readIn(1);
+    if (this.mode == 'host') {
+      for (i = 0; i < this.g.length; i++) {
+        g = this.g[i];
+        if (g.idx > 0 && g.idx < n && !g.dead) a[g.idx] = hostGuestInput(g);
+      }
+    } else if (!s.cfg.solo && n > 1) a[1] = readIn(1);
     return a;
   }
 };
 var OWN_EV = { dash: 1, jump: 1, land: 1, slide: 1, grab: 1, fling: 1 };
 
-// true when it is safe to broadcast. supabase-js falls back to one HTTP POST per message when the
-// socket is not joined, which floods the network during a reconnect, so we simply skip sends then.
+// true when it is safe to broadcast on the Supabase channel (otherwise supabase-js falls back to one
+// HTTP POST per message, which floods the network during a reconnect, so we skip sends then)
 function netCanSend() {
   var c = Net.channel;
   return !!c && (c.state === undefined || c.state === 'joined');
 }
 function netReset() {
-  Net.tk = 0; Net.ticks = 0; Net.pendingEvents = [];
-  hostResetIn();
+  Net.tk = 0; Net.ticks = 0; Net.pendingEvents = []; Net.joined = false; Net.g = [];
+  Net.pc = null; Net.dc = null; Net.ice = []; Net.relayOn = false; Net.gotSnap = false; Net.lastRx = 0; Net.ping = 0; Net.me = 1;
   Net.seq = 0; Net.pending = []; Net.pp = null; Net.ps = null; Net.err = { x: 0, z: 0, y: 0 };
-  Net.snaps = []; Net.off = null; Net.joined = false;
+  Net.snaps = []; Net.off = null;
+}
+function sig(to, k, d) {
+  if (Net.channel) Net.channel.send({ type: 'broadcast', event: 'sig', payload: { from: Net.id, to: to, k: k, d: d } });
+}
+function sd(d) { return window.RTCSessionDescription ? new RTCSessionDescription(d) : d; }
+function addIce(o, c) {
+  if (o.pc && o.pc.remoteDescription) o.pc.addIceCandidate(window.RTCIceCandidate ? new RTCIceCandidate(c) : c).catch(function () {});
+  else o.ice.push(c);
+}
+function flushIce(o) {
+  var c;
+  while ((c = o.ice.shift())) addIce(o, c);
 }
 
 // ---------------------------------------------------------------- host side
-function hostResetIn() { Net.q = []; Net.hseq = 0; Net.used = 0; Net.last = { b: 0, t: 0 }; Net.rebuf = true; Net.starve = 0; }
-function hostRemoteInput() {
-  var q = Net.q, it, a, n;
-  if (Net.rebuf && q.length >= 2) Net.rebuf = false;
-  if (!Net.rebuf && q.length) {
+function gById(id) {
+  var i;
+  for (i = 0; i < Net.g.length; i++) if (Net.g[i].id === id) return Net.g[i];
+  return null;
+}
+function closeG(g) {
+  g.dead = true;
+  try { if (g.dc) g.dc.close(); } catch (e) {}
+  try { if (g.pc) g.pc.close(); } catch (e) {}
+  g.dc = null; g.pc = null;
+}
+function liveCount() {
+  var i, n = 0;
+  for (i = 0; i < Net.g.length; i++) if (!Net.g[i].dead) n++;
+  return n;
+}
+function hostResetIn(g) { g.q = []; g.hseq = 0; g.used = 0; g.last = { b: 0, t: 0 }; g.rebuf = true; g.starve = 0; }
+function hostJoin(id) {
+  var g = gById(id), pc;
+  if (g) return;                                    // join requests are resent until the offer arrives
+  if (sim.mode != 'title') { sig(id, 'busy'); return; }
+  if (liveCount() >= MAXP - 1) { sig(id, 'full'); return; }
+  g = { id: id, idx: -1, pc: null, dc: null, ice: [], relay: false, open: false, dead: false, t0: ts(), seen: ts(),
+        q: [], hseq: 0, used: 0, last: { b: 0, t: 0 }, rebuf: true, starve: 0, pt: 0, ptAt: 0, ping: 0 };
+  Net.g.push(g);
+  if (!window.RTCPeerConnection) return;            // that guest will fall back to the relay
+  try {
+    pc = g.pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    pc.onicecandidate = function (e) { if (e.candidate) sig(id, 'ice', e.candidate); };
+    g.dc = pc.createDataChannel('g', { ordered: false, maxRetransmits: 0 });
+    g.dc.onopen = function () {
+      if (sim.mode != 'title') { sig(id, 'busy'); closeG(g); } else { g.open = true; g.seen = ts(); }
+    };
+    g.dc.onmessage = function (e) { try { hostPacket(g, JSON.parse(e.data)); } catch (err) {} };
+    pc.createOffer().then(function (o) { return pc.setLocalDescription(o); })
+      .then(function () { sig(id, 'offer', pc.localDescription); }).catch(function () {});
+  } catch (e) {}
+}
+function hostSigIn(m) {
+  var g;
+  if (m.k == 'join') { hostJoin(m.from); return; }
+  if (m.k == 'relay') {
+    hostJoin(m.from);
+    g = gById(m.from);
+    if (!g || g.dead) return;
+    if (sim.mode != 'title') { sig(g.id, 'busy'); closeG(g); return; }
+    g.relay = true; g.open = true; g.seen = ts();
+    return;
+  }
+  g = gById(m.from);
+  if (!g || g.dead) return;
+  if (m.k == 'answer' && g.pc) {
+    g.pc.setRemoteDescription(sd(m.d)).then(function () { flushIce(g); }).catch(function () {});
+  } else if (m.k == 'ice') addIce(g, m.d);
+  else if (m.k == 'bye') closeG(g);
+}
+function hostPacket(g, o) {
+  var arr = o.i, k, e, now = ts();
+  g.seen = now;
+  if (o.pt) { g.pt = o.pt; g.ptAt = now; }
+  g.ping = o.pg || 0;
+  if (!arr) return;
+  if (arr.length && arr[arr.length - 1][0] < g.hseq - 120) hostResetIn(g);   // guest restarted its counter
+  for (k = 0; k < arr.length; k++) {
+    e = arr[k];
+    if (e[0] > g.hseq) { g.q.push({ s: e[0], b: e[1], t: e[2] }); g.hseq = e[0]; }
+  }
+  if (g.q.length > 200) g.q.splice(0, g.q.length - 200);
+}
+function hostGuestInput(g) {
+  var q = g.q, it, a, n;
+  if (g.rebuf && q.length >= 2) g.rebuf = false;
+  if (!g.rebuf && q.length) {
     // too far behind: fold the extra ticks together so latency cannot build up
     while (q.length > 6) { a = q.shift(); n = q[0]; n.b |= (a.b & 192); n.t += a.t; }
     it = q.shift();
-    Net.used = it.s; Net.last = it; Net.starve = 0;
+    g.used = it.s; g.last = it; g.starve = 0;
     return { b: it.b, t: it.t };
   }
   // starved: hold the movement keys briefly, never repeat dash/jump or turning
-  Net.rebuf = true; Net.starve++;
-  if (Net.starve > 12) return { b: 0, t: 0 };
-  return { b: Net.last.b & ~192, t: 0 };
+  g.rebuf = true; g.starve++;
+  if (g.starve > 12) return { b: 0, t: 0 };
+  return { b: g.last.b & ~192, t: 0 };
+}
+function hostSendTo(g, str) {
+  if (g.dc && g.dc.readyState == 'open') {
+    if (g.dc.bufferedAmount > 65536) return;        // congested: drop this snapshot, the next one replaces it
+    try { g.dc.send(str); } catch (e) {}
+  } else if (g.relay && netCanSend()) {
+    Net.channel.send({ type: 'broadcast', event: 'st', payload: { to: g.id, s: str } });
+  }
 }
 function sendState() {
-  var st = JSON.parse(JSON.stringify(sim));
-  st.ev = Net.pendingEvents; Net.pendingEvents = [];
-  st.tk = Net.tk; st.ack = Net.used;
-  Net.channel.send({ type: 'broadcast', event: 'state', payload: { s: st } });
+  var i, g, o = [], now = ts(), base, live = [];
+  for (i = 0; i < Net.g.length; i++) if (Net.g[i].open && !Net.g[i].dead && Net.g[i].idx > 0) live.push(Net.g[i]);
+  if (!live.length) { Net.pendingEvents = []; return; }
+  for (i = 0; i < sim.p.length; i++) o.push(packP(sim.p[i], PF));
+  base = JSON.stringify({ mode: sim.mode, mt: r2(sim.mt), round: sim.round, tl: r2(sim.timeLeft), tc: r2(sim.tagCd),
+                          w: sim.winner, tm: sim.cfg.time, wn: sim.cfg.wins, mp: sim.cfg.map, pl: sim.cfg.pillars ? 1 : 0,
+                          tk: Net.tk, lob: sim.p.length, ev: Net.pendingEvents, o: o }).slice(1);
+  Net.pendingEvents = [];
+  for (i = 0; i < live.length; i++) {
+    g = live[i];
+    if (g.idx >= sim.p.length) continue;
+    hostSendTo(g, '{"you":' + g.idx + ',"ack":' + g.used + ',"pe":' + g.pt + ',"pd":' + (now - g.ptAt) +
+                  ',"f":' + JSON.stringify(packP(sim.p[g.idx], FF)) + ',' + base);
+  }
+}
+// re-derive the player list while on the title screen: drop dead guests, number the rest in join order
+function lobbySync() {
+  var live = [], i, g, k = 0;
+  for (i = 0; i < Net.g.length; i++) { g = Net.g[i]; if (g.dead) closeG(g); else live.push(g); }
+  Net.g = live;
+  for (i = 0; i < live.length; i++) { g = live[i]; if (g.open) g.idx = ++k; else g.idx = -1; }
+  sim.cfg.n = 1 + k;
+  if (sim.p.length != sim.cfg.n) simToTitle(sim);
+  netStatus(k > 0 ? 'Lobby: ' + (k + 1) + ' players connected. Press SPACE to start the match.'
+                  : 'Room ready. Share the code above; waiting for players...');
+}
+function hostMaintain() {
+  var now = ts(), i, g;
+  for (i = 0; i < Net.g.length; i++) {
+    g = Net.g[i];
+    if (g.dead) continue;
+    if (g.open && now - g.seen > DROP_MS) closeG(g);
+    else if (!g.open && now - g.t0 > 25000) closeG(g);
+  }
+  if (sim.mode == 'title') lobbySync();
+  else netStatus('Match in progress (' + sim.p.length + ' players).');
+}
+function hostStart() {
+  var i, g;
+  lobbySync();
+  if (sim.cfg.n < 2) { netStatus('Waiting for at least one player to join...'); return; }
+  for (i = 0; i < Net.g.length; i++) {
+    g = Net.g[i];
+    if (!g.open && !g.dead) { sig(g.id, 'busy'); closeG(g); }
+  }
+  simStartMatch(sim);
 }
 
 // ---------------------------------------------------------------- guest side
+function startGuestJoin() {
+  sig('host', 'join');
+  Net.joinTimer = setInterval(function () { sig('host', 'join'); }, 2000);
+  Net.relayTimer = setTimeout(function () {
+    if (Net.dc && Net.dc.readyState == 'open') return;
+    Net.relayOn = true; clearInterval(Net.joinTimer);
+    sig('host', 'relay');
+    netStatus('Direct connection failed - using the relay (slower; best with 2 players).');
+  }, window.RTCPeerConnection ? RELAY_AFTER_MS : 0);
+}
+function guestSigIn(m) {
+  var pc;
+  if (m.k == 'offer') {
+    if (Net.pc || !window.RTCPeerConnection) return;
+    clearInterval(Net.joinTimer);
+    try {
+      pc = Net.pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      pc.onicecandidate = function (e) { if (e.candidate) sig('host', 'ice', e.candidate); };
+      pc.ondatachannel = function (e) {
+        var ch = Net.dc = e.channel;
+        ch.onopen = function () { clearTimeout(Net.relayTimer); netStatus('Connected to the host. Waiting for the match...'); };
+        ch.onmessage = function (ev) { onSnapStr(ev.data); };
+      };
+      pc.setRemoteDescription(sd(m.d)).then(function () { flushIce(Net); return pc.createAnswer(); })
+        .then(function (a) { return pc.setLocalDescription(a); })
+        .then(function () { sig('host', 'answer', pc.localDescription); }).catch(function () {});
+    } catch (e) {}
+  } else if (m.k == 'ice') addIce(Net, m.d);
+  else if (m.k == 'busy') netFail('The match is already in progress. Try again when the host is back in the lobby.');
+  else if (m.k == 'full') netFail('The room is full (6 players).');
+  else if (m.k == 'bye') netFail('The host closed the room.');
+}
+function guestSend(str) {
+  if (Net.dc && Net.dc.readyState == 'open') { try { Net.dc.send(str); } catch (e) {} }
+  else if (Net.relayOn && netCanSend()) Net.channel.send({ type: 'broadcast', event: 'in', payload: { id: Net.id, s: str } });
+}
+function guestWatch() {
+  if (Net.lastRx && ts() - Net.lastRx > (Net.gotSnap ? DROP_MS : 20000))
+    netFail(Net.gotSnap ? 'Lost connection to the host.' : 'Could not reach the host. Check the room code and try again.');
+}
 // advance the predicted own player by one tick, mirroring the order used in simStep
 function predStep(ps, inp) {
   if (ps.mode == 'title') return;
@@ -590,41 +797,58 @@ function clientTick() {
     Net.ps.ev.length = 0;
   }
   Net.ticks++;
-  if (Net.ticks % NET_INPUT_EVERY == 0 && netCanSend()) sendInputs();
+  if (Net.ticks % NET_INPUT_EVERY == 0) sendInputs();
 }
 function sendInputs() {
   var arr = [], k, e, n = Net.pending.length;
   // resend the recent unacked inputs every packet: a lost packet costs nothing
   for (k = Math.max(0, n - 16); k < n; k++) { e = Net.pending[k]; arr.push([e.s, e.b, e.t]); }
-  Net.channel.send({ type: 'broadcast', event: 'input', payload: { i: arr } });
+  guestSend(JSON.stringify({ i: arr, pt: ts(), pg: Math.round(Net.ping) }));
+}
+function onSnapStr(str) {
+  var inc;
+  try { inc = JSON.parse(str); } catch (e) { return; }
+  if (!inc || !inc.o || inc.o.length < 2 || !inc.f || !(inc.you >= 0 && inc.you < inc.o.length)) return;
+  try { onSnapshot(inc); } catch (e) { netStatus('Received an invalid game update.'); }
 }
 function onSnapshot(inc) {
-  var now = new Date().getTime(), k, e, st = inc.tk * STEP * 1000, o = now - st, ps = [], q;
+  var now = ts(), k, e, i, n = inc.o.length, st = inc.tk * STEP * 1000, o = now - st, ps = [], q;
+  if (inc.you !== Net.me) {                          // the host (re)numbered us: restart prediction
+    Net.me = inc.you; Net.pp = null; Net.ps = null; Net.pending = []; Net.err = { x: 0, z: 0, y: 0 };
+  }
+  Net.gotSnap = true; Net.lastRx = now;
+  if (inc.pe) {                                      // ping = time since our probe was sent, minus the host's hold time
+    k = now - inc.pe - (inc.pd || 0);
+    if (k >= 0 && k < 5000) Net.ping = Net.ping ? Net.ping * 0.8 + k * 0.2 : k;
+  }
   // host clock -> local clock offset (tracks the fastest packets, drifts up slowly)
   if (Net.off === null || Math.abs(o - Net.off) > 500) Net.off = o;
   else if (o < Net.off) Net.off += (o - Net.off) * 0.3;
   else Net.off += (o - Net.off) * 0.02;
-  for (k = 0; k < inc.p.length; k++) {
-    q = inc.p[k];
-    ps.push({ x: q.x, z: q.z, y: q.y, a: q.a, vx: q.vx, vz: q.vz });
-  }
+  // authoritative state
+  simSetN(sim, n);
+  for (i = 0; i < n; i++) unpackP(sim.p[i], inc.o[i], PF);
+  unpackP(sim.p[Net.me], inc.f, FF);
+  sim.mode = inc.mode; sim.mt = inc.mt; sim.round = inc.round; sim.timeLeft = inc.tl; sim.tagCd = inc.tc; sim.winner = inc.w;
+  sim.cfg.solo = false; sim.cfg.n = n; sim.cfg.time = inc.tm; sim.cfg.wins = inc.wn;
+  if (sim.cfg.map !== inc.mp || sim.cfg.pillars !== !!inc.pl) { sim.cfg.map = inc.mp; sim.cfg.pillars = !!inc.pl; simPillars(sim); }
+  for (i = 0; i < n; i++) { q = sim.p[i]; ps.push({ x: q.x, z: q.z, y: q.y, a: q.a, vx: q.vx, vz: q.vz }); }
   Net.snaps.push({ st: st, p: ps });
   if (Net.snaps.length > 12) Net.snaps.shift();
-  // authoritative state
-  for (k in inc) if (k != 'ev' && k != 'tk' && k != 'ack') sim[k] = inc[k];
-  // events: the guest plays its own actions from prediction, everything else from the host
+  // events: a guest plays its own actions from prediction, everything else from the host
   for (k = 0; k < (inc.ev || []).length; k++) {
     e = inc.ev[k];
     if (!(OWN_EV[e.t] && e.i === Net.me)) sim.ev.push(e);
   }
+  netStatus(sim.mode == 'title' ? 'Lobby: ' + n + ' players. Waiting for the host to start...' : 'Playing online (' + n + ' players).');
   reconcile(inc);
 }
 function reconcile(inc) {
   var i, old = Net.pp, ox, oz, oy, np, rs, rp, dx, dz, dy;
   while (Net.pending.length && Net.pending[0].s <= (inc.ack || 0)) Net.pending.shift();
-  np = JSON.parse(JSON.stringify(inc.p[Net.me]));
-  rp = inc.p.slice(); rp[Net.me] = np;
-  rs = { mode: inc.mode, mt: inc.mt, R: inc.R, pillars: inc.pillars, cfg: inc.cfg, ev: [], p: rp };
+  np = JSON.parse(JSON.stringify(sim.p[Net.me]));
+  rp = sim.p.slice(); rp[Net.me] = np;
+  rs = { mode: sim.mode, mt: sim.mt, R: sim.R, pillars: sim.pillars, cfg: sim.cfg, ev: [], p: rp };
   for (i = 0; i < Net.pending.length; i++) { predStep(rs, Net.pending[i]); rs.ev.length = 0; }
   if (old) {
     // keep what is on screen continuous: error = shown position before - corrected position now
@@ -640,7 +864,7 @@ function angDiff(a, b) { return Math.atan2(Math.sin(b - a), Math.cos(b - a)); }
 function interpRemote() {
   var b = Net.snaps, n = b.length, rt, i, A, B, f = 0, dt = 0, out = [], j, a, c;
   if (!n || Net.off === null) return null;
-  rt = new Date().getTime() - Net.off - INTERP_MS;
+  rt = ts() - Net.off - INTERP_MS;
   if (rt <= b[0].st) { A = B = b[0]; }
   else if (rt >= b[n - 1].st) { A = B = b[n - 1]; dt = Math.min(0.12, (rt - A.st) / 1000); }   // late: extrapolate a little
   else {
@@ -676,13 +900,19 @@ function buildDP(dt) {
   e = Net.err; e.x *= f; e.z *= f; e.y *= f;
   DP[Net.me] = mixP(Net.pp, { x: Net.pp.x + e.x, z: Net.pp.z + e.z, y: Net.pp.y + e.y });
 }
+function pingText() {
+  var i, m = 0;
+  if (Net.mode == 'client') return Net.ping ? Math.round(Net.ping) + ' ms' : '... ms';
+  for (i = 0; i < Net.g.length; i++) if (!Net.g[i].dead && Net.g[i].ping > m) m = Net.g[i].ping;
+  return m ? 'worst ping ' + m + ' ms' : 'ping ...';
+}
 
-// ---------------------------------------------------------------- connection
+// ---------------------------------------------------------------- connection (Supabase = signalling + relay)
 var SUPABASE_URL = 'https://xkzltynwpbxhdopllhzq.supabase.co';
 var SUPABASE_KEY = 'sb_publishable_WK6_gMdV6DN7OQkKpZSwkQ_N4NMfpOp';
 var sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 var netStatusEl = document.getElementById('netStatus');
-function netStatus(t) { Net.status = t; if (netStatusEl) netStatusEl.textContent = t; }
+function netStatus(t) { if (Net.status === t) return; Net.status = t; if (netStatusEl) netStatusEl.textContent = t; }
 function setRoomUI(code) {
   document.getElementById('roomActions').style.display = code ? 'block' : 'none';
   document.getElementById('roomLabel').textContent = code || '';
@@ -692,59 +922,68 @@ function makeRoomCode() {
   for (i = 0; i < 6; i++) out += chars.charAt(Math.floor(Math.random() * chars.length));
   return out;
 }
+function sayBye() {
+  var i;
+  if (Net.mode == 'host') { for (i = 0; i < Net.g.length; i++) sig(Net.g[i].id, 'bye'); }
+  else if (Net.mode == 'client') sig('host', 'bye');
+}
 function leaveOnline() {
-  if (Net.channel) { try { sb.removeChannel(Net.channel); } catch (e) {} }
+  var i, ch = Net.channel;
+  clearInterval(Net.joinTimer); clearTimeout(Net.relayTimer);
+  sayBye();
+  if (Net.mode == 'host') { for (i = 0; i < Net.g.length; i++) closeG(Net.g[i]); }
+  else {
+    try { if (Net.dc) Net.dc.close(); } catch (e) {}
+    try { if (Net.pc) Net.pc.close(); } catch (e) {}
+  }
+  if (ch) setTimeout(function () { try { sb.removeChannel(ch); } catch (e) {} }, 300);   // let the bye messages out first
   Net.channel = null; Net.mode = 'local'; Net.role = 'local'; Net.room = '';
+  sim.cfg.online = false; sim.cfg.n = 2;
   netReset();
   setRoomUI(''); netStatus('Local mode is unchanged. Create or join a room to play online.');
+  paused = false;
   simToTitle(sim);
 }
+function netFail(msg) { leaveOnline(); netStatus(msg); }
 function openOnlineRoom(code, role) {
   if (Net.channel) leaveOnline();
-  simToTitle(sim);
   code = String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   if (code.length !== 6) { netStatus('Enter a 6-character room code.'); return; }
   netReset();
-  Net.mode = role; Net.role = role; Net.room = code;
-  if (role == 'host') { sim.cfg.solo = false; sim.cfg.n = 2; simToTitle(sim); }   // online is 2 players for now
+  Net.mode = role; Net.role = role; Net.room = code; Net.id = makeRoomCode() + makeRoomCode();
+  sim.cfg.solo = false; paused = false;
+  if (role == 'host') { sim.cfg.online = true; sim.cfg.n = 1; } else { sim.cfg.online = false; sim.cfg.n = 2; }
+  simToTitle(sim);
   setRoomUI(code); netStatus('Connecting to room ' + code + '...');
   var ch = sb.channel('puppet-tag-' + code, { config: { broadcast: { self: false } } });
   Net.channel = ch;
-  ch.on('broadcast', { event: 'input' }, function (msg) {
-    if (Net.mode != 'host' || !msg.payload || !msg.payload.i) return;
-    var arr = msg.payload.i, k, e;
-    if (arr.length && arr[arr.length - 1][0] < Net.hseq - 120) hostResetIn();   // guest restarted its counter
-    for (k = 0; k < arr.length; k++) {
-      e = arr[k];
-      if (e[0] > Net.hseq) { Net.q.push({ s: e[0], b: e[1], t: e[2] }); Net.hseq = e[0]; }
-    }
-    if (Net.q.length > 200) Net.q.splice(0, Net.q.length - 200);
+  ch.on('broadcast', { event: 'sig' }, function (m) {
+    var p = m.payload;
+    if (!p || p.from === Net.id) return;
+    if (Net.mode == 'host' && p.to === 'host') hostSigIn(p);
+    else if (Net.mode == 'client' && p.to === Net.id) guestSigIn(p);
   });
-  ch.on('broadcast', { event: 'state' }, function (msg) {
-    if (Net.mode != 'client' || !msg.payload || !msg.payload.s) return;
-    var inc = msg.payload.s;
-    if (!inc.p || inc.p.length < 2) return;
-    try { onSnapshot(inc); } catch (e) { netStatus('Received an invalid game update.'); }
+  // relay fallback: guest inputs -> host, host snapshots -> one guest
+  ch.on('broadcast', { event: 'in' }, function (m) {
+    var p = m.payload, g;
+    if (Net.mode != 'host' || !p) return;
+    g = gById(p.id);
+    if (!g || g.dead) return;
+    try { hostPacket(g, JSON.parse(p.s)); } catch (e) {}
   });
-  ch.on('broadcast', { event: 'hello' }, function () {
-    if (Net.mode == 'host') { hostResetIn(); netStatus('Opponent connected. Press SPACE to start the match.'); }
+  ch.on('broadcast', { event: 'st' }, function (m) {
+    var p = m.payload;
+    if (Net.mode == 'client' && p && p.to === Net.id) onSnapStr(p.s);
   });
-  ch.on('broadcast', { event: 'bye' }, function () {
-    if (Net.mode == 'host') { hostResetIn(); netStatus('Opponent disconnected. Waiting for someone to rejoin...'); }
-  });
-  // supabase-js calls this again after every automatic rejoin, so SUBSCRIBED can fire repeatedly.
-  // On a rejoin the guest says hello again (the host then resets its input queue); sequence
-  // numbers keep counting up, so nothing else needs resetting. See the v3 notes at the top.
+  // supabase-js calls this again after every automatic rejoin, so SUBSCRIBED can fire repeatedly
   ch.subscribe(function (status) {
     if (status === 'SUBSCRIBED') {
       var again = Net.joined; Net.joined = true;
-      if (role == 'host') netStatus(again ? 'Reconnected.' : 'Room ready. Share the code above; waiting for opponent...');
-      else {
-        netStatus(again ? 'Reconnected.' : 'Joined room. Waiting for host to start. Use W/S, A/D, Q/E, F, SPACE and SHIFT to play.');
-        ch.send({ type: 'broadcast', event: 'hello', payload: { role: 'client' } });
-      }
+      if (again) return;
+      if (role == 'host') netStatus('Room ready. Share the code above; waiting for players...');
+      else { netStatus('Joined room. Connecting to the host...'); Net.lastRx = ts(); startGuestJoin(); }
     } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
-      netStatus('Connection issue (' + status + '). Reconnecting automatically; if it does not recover, leave and join again.');
+      netStatus('Signalling connection issue (' + status + '). Reconnecting automatically; running connections are not affected.');
     }
   });
 }
@@ -752,9 +991,7 @@ document.getElementById('createRoom').onclick = function () { openOnlineRoom(mak
 document.getElementById('joinRoom').onclick = function () { openOnlineRoom(document.getElementById('roomCode').value, 'client'); };
 document.getElementById('leaveRoom').onclick = leaveOnline;
 document.getElementById('roomCode').onkeydown = function (e) { if ((e.key || '') == 'Enter') document.getElementById('joinRoom').click(); };
-window.addEventListener('beforeunload', function () {
-  if (Net.channel) Net.channel.send({ type: 'broadcast', event: 'bye', payload: {} });
-});
+window.addEventListener('beforeunload', sayBye);
 
 // =============================================================== VIS (local only)
 var vis = [], parts = [], shake = 0, clock = 0, msg = { txt: '', col: '#fff', t: 99 };
@@ -1249,12 +1486,12 @@ function drawTitle() {
   text('Least time spent as IT when the clock ends wins the round. Touch someone while IT to tag.', W / 2, 296, 14, '#bbb');
   text('Dash into IT to shove them. Grab a pillar, spin up, release to fling where you look.', W / 2, 314, 14, '#bbb');
   var solo = sim.cfg.solo, on = Net.mode != 'local';
-  text('[G] mode: ' + (on ? 'ONLINE (2 players)' : (solo ? 'SOLO PRACTICE (idle dummies, no clock)' : '2 PLAYER SPLIT SCREEN')), W / 2, 346, 17, '#f1c40f');
+  text('[G] mode: ' + (on ? 'ONLINE (' + sim.p.length + ' player' + (sim.p.length == 1 ? '' : 's') + ' in lobby)' : (solo ? 'SOLO PRACTICE (idle dummies, no clock)' : '2 PLAYER SPLIT SCREEN')), W / 2, 346, 17, '#f1c40f');
   text('[L] mouse look (P1): ' + (sim.cfg.mouse ? 'on - click the game to capture' : 'off'), W / 2, 368, 17, '#f1c40f');
   text('[T] round time: ' + (solo ? '-' : sim.cfg.time + 's'), 250, 394, 15, solo ? '#777' : '#f1c40f');
   text('[B] pillars: ' + (sim.cfg.pillars ? 'on' : 'off'), W / 2, 394, 15, '#f1c40f');
   text('[M] first to: ' + (solo ? '-' : sim.cfg.wins), 710, 394, 15, solo ? '#777' : '#f1c40f');
-  text('[N] players: ' + (solo && !on ? sim.cfg.n + ' (you + ' + (sim.cfg.n - 1) + ' dummies)' : '2'), 250, 416, 15, solo && !on ? '#f1c40f' : '#777');
+  text('[N] players: ' + (on ? sim.p.length + ' connected' : solo ? sim.cfg.n + ' (you + ' + (sim.cfg.n - 1) + ' dummies)' : '2'), 250, 416, 15, solo && !on ? '#f1c40f' : '#777');
   text('[V] map: ' + MAPDEFS[sim.cfg.map].name, 710, 416, 15, '#f1c40f');
   ctx.globalAlpha = 0.6 + 0.4 * Math.sin(clock * 4);
   text(Net.mode == 'client' ? 'Waiting for host to start...' : 'Press SPACE to start', W / 2, 455, 26, Net.mode == 'client' ? '#f1c40f' : '#2ecc71');
@@ -1269,7 +1506,8 @@ function render() {
     setView(960, 90);
     renderView(Net.mode == 'client' ? Net.me : 0);
     ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(W / 2 - 150, 0, 300, 22);
-    text((Net.mode == 'host' ? 'ONLINE  |  HOST' : 'ONLINE  |  PLAYER 2') + '  |  ' + Net.room, W / 2, 16, 13, '#9fb3c8');
+    ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(W / 2 - 190, 0, 380, 22);
+    text('ONLINE  |  ' + (Net.mode == 'host' ? 'HOST' : 'PLAYER ' + (Net.me + 1)) + '  |  ' + Net.room + '  |  ' + pingText(), W / 2, 16, 13, '#9fb3c8');
   } else if (sim.cfg.solo) {
     setView(960, 90);
     renderView(0);
@@ -1323,10 +1561,10 @@ function exitLock() {
 }
 function onPress(k) {
   var i, j, on = Net.mode != 'local';
-  if (k == 27) { paused = false; exitLock(); Input.mx = 0; simToTitle(sim); return; }
+  if (k == 27) { paused = false; exitLock(); Input.mx = 0; if (Net.mode == 'client') leaveOnline(); else simToTitle(sim); return; }
   if (sim.mode == 'title') {
     if (Net.mode == 'client') return;
-    if (k == 32 || k == 13) simStartMatch(sim);
+    if (k == 32 || k == 13) { if (Net.mode == 'host') hostStart(); else simStartMatch(sim); }
     else if (k == 84) sim.cfg.time = TIMES[(TIMES.indexOf(sim.cfg.time) + 1) % TIMES.length];
     else if (k == 77) sim.cfg.wins = WINS[(WINS.indexOf(sim.cfg.wins) + 1) % WINS.length];
     else if (k == 66) { sim.cfg.pillars = !sim.cfg.pillars; simPillars(sim); }
@@ -1337,7 +1575,7 @@ function onPress(k) {
     return;
   }
   if (sim.mode == 'matchend') { if (k == 32 || k == 13) simToTitle(sim); return; }
-  if (k == 80) { paused = !paused; return; }
+  if (k == 80) { if (Net.mode == 'local') paused = !paused; return; }
   if (k == 82 && sim.cfg.solo) { simStartRound(sim); return; }
   for (i = 0; i < 2; i++) {
     for (j = 0; j < MAPS[i].act.length; j++)
@@ -1352,7 +1590,7 @@ function lockChange() {
   var d = document, was = Input.locked;
   Input.locked = (d.pointerLockElement || d.mozPointerLockElement) === cv;
   if (Input.locked) Input.drag = false;
-  if (was && !Input.locked && sim.mode != 'title') paused = true;
+  if (was && !Input.locked && sim.mode != 'title' && Net.mode == 'local') paused = true;
 }
 if (document.addEventListener) {
   document.addEventListener('pointerlockchange', lockChange, false);
@@ -1419,13 +1657,14 @@ setInterval(function () {
           // does not replay a burst of old sounds/particles
           if (Net.pendingEvents.length > 40) Net.pendingEvents.splice(0, Net.pendingEvents.length - 40);
           Net.tk++; Net.ticks++;
-          if (Net.ticks % NET_STATE_EVERY == 0 && netCanSend()) sendState();
+          if (Net.ticks % NET_STATE_EVERY == 0) sendState();
         }
       }
       acc -= STEP; n++;
     }
     if (n >= 5) acc = 0;
   }
+  if (Net.mode == 'host') hostMaintain(); else if (Net.mode == 'client') guestWatch();
   buildDP(dt);
   if (!paused) {
     handleEvents();
