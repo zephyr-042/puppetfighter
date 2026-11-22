@@ -64,7 +64,7 @@ function stepP(s, i, bits, tdel, dt) {
   if (can && tdel) p.a += tdel;
   var ca = Math.cos(p.a), sa = Math.sin(p.a);
   // momentum ramp: 150 -> 225 over 1.5 s of clean running (IT keeps its 1.12x on top)
-  var speed = (150 + 75 * clamp(p.runT / 1.5, 0, 1)) * (p.isIt ? 1.12 : 1);
+  var speed = (210 + 190 * clamp(p.runT / 1.5, 0, 1)) * (p.isIt ? 1.06 : 1);
   var grounded = p.y <= p.gy + 0.01 && p.vy <= 0;
 
   // release the pillar: fling along the facing direction (jump = fling upward)
