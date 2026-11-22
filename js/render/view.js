@@ -1,6 +1,6 @@
 /* ============================================================================
    js/render/view.js
-   RENDER (2/3): renderView(pi): the raycaster, sky / floor, obstacles, sprites, HUD for one player view.
+   RENDER (2/3): renderView(pi): the raycaster, sky / floor, box + pillar tops, floor holes, falling-off-the-building view, sprites, HUD.
    Loads after: render/draw.js
    ============================================================================ */
 function renderView(pi) {
@@ -8,7 +8,7 @@ function renderView(pi) {
   var i, k;
   var flopAmt = p.stun > 0 ? Math.sin(PI * (1 - p.stun / p.stunMax)) : 0;
   var bob = Math.abs(Math.sin(v.phase)) * 3 * v.moving * (p.y <= p.gy + 0.5 ? 1 : 0);
-  var eye = Math.max(14, 55 + p.y - 38 * flopAmt - 22 * v.cr + bob);   // eye height above the floor
+  var eye = p.fell ? 55 + p.y : Math.max(14, 55 + p.y - 38 * flopAmt - 22 * v.cr + bob);   // eye height above the roof level
   var focal = F0 * (1 - 0.18 * v.kick);
   var horizon = VH / 2 + flopAmt * 70 + Math.tan(v.pitch) * focal;   // looking up moves the horizon down
   var depth = [];
@@ -20,13 +20,24 @@ function renderView(pi) {
   var shx = 0, shy = 0;
   if (shake > 0) { shx = (Math.random() - 0.5) * shake; shy = (Math.random() - 0.5) * shake; }
   ctx.translate(viewOffset + shx, shy);
+  ctx.save();                                    // world layer (restored before the HUD); tilts a little while falling
+  var tilt = p.fell ? Math.sin(clock * 5 + pi) * 0.06 * clamp(-p.vy / 500, 0, 1) : 0;
+  if (tilt) {
+    ctx.translate(VW / 2, VH / 2); ctx.rotate(tilt);
+    ctx.scale(1 + 2.2 * Math.abs(tilt), 1 + 2.2 * Math.abs(tilt));
+    ctx.translate(-VW / 2, -VH / 2);
+  }
 
   // sky + floor. Roof: an open void with a city skyline; the roof surface is drawn per column below
   var rect = sim.rect, g, g2 = ctx.createLinearGradient(0, horizon, 0, horizon + VH / 2);
+  // falling off the roof: past the wall you see the building facade rush by; through the skylight it is dark inside
+  var outside = !!rect && (Math.abs(p.x) > rect.hw || Math.abs(p.z) > rect.hd);
+  var facade = !!rect && p.fell && outside, pit = !!rect && p.fell && !outside;
   if (rect) {
     g = ctx.createLinearGradient(0, horizon - VH / 2, 0, horizon + VH / 2);
     g.addColorStop(0, '#0a1020'); g.addColorStop(0.5, '#34506e'); g.addColorStop(1, '#0b1118');
     ctx.fillStyle = g; ctx.fillRect(-10, -10, VW + 20, VH + 20);
+    if (pit) { ctx.fillStyle = '#06090d'; ctx.fillRect(-10, -10, VW + 20, VH + 20); }
     g2.addColorStop(0, '#4a5662'); g2.addColorStop(1, '#222c36');
   } else {
     g = ctx.createLinearGradient(0, horizon - VH / 2, 0, horizon);
@@ -52,15 +63,50 @@ function renderView(pi) {
   // one ray per column: arena edge first, then pillars and boxes far to near
   var pillars = sim.pillars, boxes = sim.boxes || NOBOX, hits = [], hi, wallD = [], hq, bb;
   var cx = p.x, cz = p.z;
-  if (rect) { cx = clamp(cx, -rect.hw + 2, rect.hw - 2); cz = clamp(cz, -rect.hd + 2, rect.hd - 2); }
-  for (i = 0; i < NCOL; i++) {
+  if (rect && !facade) { cx = clamp(cx, -rect.hw + 2, rect.hw - 2); cz = clamp(cz, -rect.hd + 2, rect.hd - 2); }
+  var NC = pit ? 0 : NCOL, holes = sim.holes || NOBOX;
+  // colour of a top face: lighter than the sides, fogged by distance
+  function topCol(c, tp) {
+    var f3 = clamp(1.1 - tp / fog, 0.3, 1);
+    return 'rgb(' + Math.round(Math.min(255, c[0] * 1.25 + 14) * f3) + ',' + Math.round(Math.min(255, c[1] * 1.25 + 14) * f3) + ',' + Math.round(Math.min(255, c[2] * 1.25 + 14) * f3) + ')';
+  }
+  for (i = 0; i < NC; i++) {
     var cxs = i * COLW + COLW / 2 - VW / 2;
     var a = Math.atan(cxs / focal);
     var ca2 = Math.cos(a);
     var ang = p.a + a;
     var dx = Math.cos(ang), dz = Math.sin(ang);
     var tmin, u, alt, wd;
-    if (rect) {
+    if (facade) {
+      // outside the building: the wall below the roof lip with rows of windows rushing upward
+      var fix = Math.abs(dx) < 1e-6 ? 1e-6 : dx, fiz = Math.abs(dz) < 1e-6 ? 1e-6 : dz;
+      var fx1 = (-rect.hw - cx) / fix, fx2 = (rect.hw - cx) / fix, fz1 = (-rect.hd - cz) / fiz, fz2 = (rect.hd - cz) / fiz;
+      var fnx = Math.min(fx1, fx2), fnz = Math.min(fz1, fz2), ftn = Math.max(fnx, fnz), ftf = Math.min(Math.max(fx1, fx2), Math.max(fz1, fz2));
+      tmin = 0; wd = 1e9;
+      if (ftn < ftf && ftn > 0) {
+        wd = Math.max(1, ftn * ca2);
+        u = fnx > fnz ? cz + dz * ftn : cx + dx * ftn;
+        var fTop = horizon + (eye - rect.lip) * focal / wd, fBot = Math.min(VH + 2, horizon + (eye + 900) * focal / wd);
+        var fsh = clamp(1.1 - wd / fog, 0.35, 1) * (fnx > fnz ? 1 : 0.82);
+        ctx.fillStyle = 'rgb(' + Math.round(104 * fsh) + ',' + Math.round(108 * fsh) + ',' + Math.round(116 * fsh) + ')';
+        ctx.fillRect(i * COLW, fTop, COLW, fBot - fTop);
+        var uf = ((u % 40) + 40) % 40, ub = Math.floor(u / 40);
+        if (uf > 12 && uf < 28) {
+          for (var wh = rect.lip - 26, wr = 0; wr < 40; wh -= 34, wr++) {
+            var wy0 = horizon + (eye - wh) * focal / wd;
+            if (wy0 > VH) break;
+            var wy1 = horizon + (eye - wh + 16) * focal / wd;
+            if (wy1 < 0) continue;
+            ctx.fillStyle = (((ub * 7 + wr * 13) & 3) == 0) ? 'rgba(255,214,120,' + (0.65 * fsh) + ')' : 'rgba(18,28,42,0.9)';
+            ctx.fillRect(i * COLW, wy0, COLW, wy1 - wy0);
+          }
+        }
+      } else {                                               // the ray misses the building: distant skyline
+        var fbld = Math.floor(ang * 6), fbh = ((fbld * 2654435761) >>> 0) % 1000 / 1000, fsy = horizon - 14 - fbh * 100;
+        ctx.fillStyle = (fbld & 1) ? '#111b29' : '#0d1622';
+        ctx.fillRect(i * COLW, fsy, COLW, horizon + 50 - fsy);
+      }
+    } else if (rect) {
       var tx = dx > 0.00001 ? (rect.hw - cx) / dx : (dx < -0.00001 ? (-rect.hw - cx) / dx : 1e9);
       var tz = dz > 0.00001 ? (rect.hd - cz) / dz : (dz < -0.00001 ? (-rect.hd - cz) / dz : 1e9);
       tmin = Math.max(1, Math.min(tx, tz));
@@ -68,7 +114,24 @@ function renderView(pi) {
       alt = Math.floor(u / 36) & 1;
       wd = Math.max(1, tmin * ca2);
       var botY = horizon + eye * focal / wd, lipY = horizon + (eye - rect.lip) * focal / wd;
-      if (botY < VH) { ctx.fillStyle = g2; ctx.fillRect(i * COLW, botY, COLW, VH - botY + 1); }   // the roof surface
+      if (botY < VH) {
+        ctx.fillStyle = g2; ctx.fillRect(i * COLW, botY, COLW, VH - botY + 1);                    // the roof surface
+        for (k = 0; k < holes.length; k++) {                                                       // floor holes (skylight): dark glass
+          bb = holes[k];
+          var hix = Math.abs(dx) < 1e-6 ? 1e-6 : dx, hiz = Math.abs(dz) < 1e-6 ? 1e-6 : dz;
+          var hx1 = (bb.x - bb.hw - cx) / hix, hx2 = (bb.x + bb.hw - cx) / hix, hz1 = (bb.z - bb.hd - cz) / hiz, hz2 = (bb.z + bb.hd - cz) / hiz;
+          var hn = Math.max(Math.min(hx1, hx2), Math.min(hz1, hz2)), hf = Math.min(Math.max(hx1, hx2), Math.max(hz1, hz2));
+          if (hn < hf && hf > 0 && eye > 0) {
+            var yN = Math.min(VH + 2, horizon + eye * focal / Math.max(1, Math.max(hn, 1) * ca2));
+            var yF = Math.max(botY, horizon + eye * focal / Math.max(1, hf * ca2));
+            if (yN > yF) {
+              ctx.fillStyle = '#070d14'; ctx.fillRect(i * COLW, yF, COLW, yN - yF);
+              ctx.fillStyle = 'rgba(150,185,215,0.30)'; ctx.fillRect(i * COLW, yF, COLW, 2);
+              if (hn > 1 && yN < VH) ctx.fillRect(i * COLW, yN - 2, COLW, 2);
+            }
+          }
+        }
+      }
       var bld = Math.floor(ang * 6), bh = ((bld * 2654435761) >>> 0) % 1000 / 1000;               // skyline beyond the edge
       var skyY = horizon - 14 - bh * 100;
       if (skyY < lipY) {
@@ -97,8 +160,8 @@ function renderView(pi) {
       var c2 = ex * ex + ez * ez - pillars[k].r * pillars[k].r;
       var disc = b * b - c2;
       if (disc >= 0) {
-        var t = -b - Math.sqrt(disc);
-        if (t > 0 && t < tmin) hits.push({ t: t, k: k, bx: 0, f: 0 });
+        var sq = Math.sqrt(disc), t = -b - sq;
+        if (t > 0 && t < tmin) hits.push({ t: t, k: k, bx: 0, f: 0, tf: -b + sq, top: 0 });
       }
     }
     for (k = 0; k < boxes.length; k++) {                      // ray against an axis-aligned box (slab test)
@@ -106,7 +169,8 @@ function renderView(pi) {
       var ix = Math.abs(dx) < 1e-6 ? 1e-6 : dx, iz = Math.abs(dz) < 1e-6 ? 1e-6 : dz;
       var x1 = (bb.x - bb.hw - cx) / ix, x2 = (bb.x + bb.hw - cx) / ix, z1 = (bb.z - bb.hd - cz) / iz, z2 = (bb.z + bb.hd - cz) / iz;
       var nx0 = Math.min(x1, x2), nz0 = Math.min(z1, z2), tn = Math.max(nx0, nz0), tf = Math.min(Math.max(x1, x2), Math.max(z1, z2));
-      if (tn < tf && tn > 0 && tn < tmin) hits.push({ t: tn, k: k, bx: 1, f: nx0 > nz0 ? 0 : 1 });
+      if (tn < tf && tn > 0 && tn < tmin) hits.push({ t: tn, k: k, bx: 1, f: nx0 > nz0 ? 0 : 1, tf: tf, top: 0 });
+      else if (rect && !facade && tn <= 0 && tf > 0 && eye > bb.h) hits.push({ t: 0.01, k: k, bx: 1, f: 0, tf: tf, top: 1 });   // standing above it
     }
     hits.sort(function (m, n2) { return n2.t - m.t; });
     for (hi = 0; hi < hits.length; hi++) {
@@ -114,13 +178,24 @@ function renderView(pi) {
       var tp = Math.max(1, hq.t * ca2);
       if (hq.bx) {
         bb = boxes[hq.k];
-        var bs = hq.f ? 0.78 : 1;                              // the two face directions get different shading
-        strip(i, tp, [bb.c[0] * bs, bb.c[1] * bs, bb.c[2] * bs], bb.h);
+        if (eye > bb.h) {                                      // seen from above: draw the top face (far edge down to the front edge)
+          var tfd = Math.max(1, hq.tf * ca2), ty0 = horizon + (eye - bb.h) * focal / tfd;
+          var ty1 = hq.top ? VH + 2 : horizon + (eye - bb.h) * focal / tp;
+          ctx.fillStyle = topCol(bb.c, hq.top ? tfd : tp); ctx.fillRect(i * COLW, ty0, COLW, ty1 - ty0);
+        }
+        if (!hq.top) {
+          var bs = hq.f ? 0.78 : 1;                            // the two face directions get different shading
+          strip(i, tp, [bb.c[0] * bs, bb.c[1] * bs, bb.c[2] * bs], bb.h);
+        }
       } else {
         var pk = pillars[hq.k];
         var pu = Math.atan2(cz + dz * hq.t - pk.z, cx + dx * hq.t - pk.x);
         var palt = Math.floor((pu + PI) * 3 / PI) & 1;
         var pc = pk.c ? (palt ? [pk.c[0] * 1.12, pk.c[1] * 1.12, pk.c[2] * 1.12] : pk.c) : (palt ? [176, 146, 110] : [150, 122, 92]);
+        if (rect && eye > pk.h) {                              // roof pillars are true height: draw their tops too
+          var ptf = Math.max(1, hq.tf * ca2), py0 = horizon + (eye - pk.h) * focal / ptf, py1 = horizon + (eye - pk.h) * focal / tp;
+          ctx.fillStyle = topCol(pk.c || [150, 122, 92], tp); ctx.fillRect(i * COLW, py0, COLW, py1 - py0);
+        }
         // circle maps draw pillars wall-high so their upper section does not reveal the wall texture
         // behind them (gameplay height is still pk.h). The roof has no wall behind, so it uses true heights.
         strip(i, tp, pc, rect ? pk.h : WALL_H);
@@ -129,10 +204,11 @@ function renderView(pi) {
     }
   }
 
-  // screen y of the top of the nearest obstacle in front of distance dF in column ci (1e9 = none, -1e9 = fully blocked)
+  // screen y of the top of the nearest obstacle in front of distance dF in column ci (1e9 = none, -1e9 = fully blocked).
+  // From above, a puppet behind a low obstacle is also hidden by that obstacle's top face (up to its far edge)
   function colLim(ci, dF) {
     var cs = ci * COLW + COLW / 2 - VW / 2, aa = Math.atan(cs / focal), an = p.a + aa;
-    var ux = Math.cos(an), uz = Math.sin(an), cq = Math.cos(aa), lim = 1e9, kk, o2, ex2, ez2, b2, d3, t3, tp3, y3, ix, iz, x1, x2, z1, z2, tn, tf;
+    var ux = Math.cos(an), uz = Math.sin(an), cq = Math.cos(aa), lim = 1e9, kk, o2, ex2, ez2, b2, d3, sq, t3, tp3, tf3, y3, ix, iz, x1, x2, z1, z2, tn, tf, hh;
     if (wallD[ci] < dF) return -1e9;
     for (kk = 0; kk < pillars.length; kk++) {
       o2 = pillars[kk];
@@ -140,8 +216,12 @@ function renderView(pi) {
       b2 = ex2 * ux + ez2 * uz;
       d3 = b2 * b2 - (ex2 * ex2 + ez2 * ez2 - o2.r * o2.r);
       if (d3 >= 0) {
-        t3 = -b2 - Math.sqrt(d3); tp3 = t3 * cq;
-        if (t3 > 0 && tp3 < dF) { y3 = horizon - ((rect ? o2.h : WALL_H) - eye) * focal / tp3; if (y3 < lim) lim = y3; }
+        sq = Math.sqrt(d3); t3 = -b2 - sq; tp3 = t3 * cq; tf3 = (-b2 + sq) * cq;
+        if (t3 > 0 && tp3 < dF) {
+          hh = rect ? o2.h : WALL_H;
+          y3 = (rect && eye > hh && dF > tf3) ? horizon + (eye - hh) * focal / Math.max(1, tf3) : horizon - (hh - eye) * focal / tp3;
+          if (y3 < lim) lim = y3;
+        }
       }
     }
     for (kk = 0; kk < boxes.length; kk++) {
@@ -149,8 +229,11 @@ function renderView(pi) {
       ix = Math.abs(ux) < 1e-6 ? 1e-6 : ux; iz = Math.abs(uz) < 1e-6 ? 1e-6 : uz;
       x1 = (o2.x - o2.hw - cx) / ix; x2 = (o2.x + o2.hw - cx) / ix; z1 = (o2.z - o2.hd - cz) / iz; z2 = (o2.z + o2.hd - cz) / iz;
       tn = Math.max(Math.min(x1, x2), Math.min(z1, z2)); tf = Math.min(Math.max(x1, x2), Math.max(z1, z2));
-      tp3 = tn * cq;
-      if (tn < tf && tn > 0 && tp3 < dF) { y3 = horizon - (o2.h - eye) * focal / tp3; if (y3 < lim) lim = y3; }
+      tp3 = tn * cq; tf3 = tf * cq;
+      if (tn < tf && tn > 0 && tp3 < dF) {
+        y3 = (eye > o2.h && dF > tf3) ? horizon + (eye - o2.h) * focal / Math.max(1, tf3) : horizon - (o2.h - eye) * focal / tp3;
+        if (y3 < lim) lim = y3;
+      }
     }
     return lim;
   }
@@ -165,7 +248,7 @@ function renderView(pi) {
     opps.push({ j: oj, o: oo, dF: ddx * ca + ddz * sa, dR: -ddx * sa + ddz * ca, d: hyp(ddx, ddz) });
   }
   opps.sort(function (m, n2) { return n2.dF - m.dF; });
-  for (k = 0; k < opps.length; k++) {
+  for (k = 0; k < (pit ? 0 : opps.length); k++) {
     var op = opps[k], o = op.o, dF = op.dF, dR = op.dR, onScreen = false;
     if (!nearest || op.d < nearest.d) nearest = op;
     if (dF > 6) {
@@ -216,10 +299,12 @@ function renderView(pi) {
   ctx.globalAlpha = 1;
 
   drawHands(pi, p, v, flopAmt);
-  if (p.y < -15) {                                // falling off the roof: fade to black
-    ctx.fillStyle = 'rgba(0,0,0,' + clamp((-p.y - 15) / 110, 0, 0.96) + ')';
-    ctx.fillRect(0, 0, VW, VH);
+  ctx.restore();                                   // end of the (possibly tilted) world layer
+  if (p.fell) {                                    // dropping: darker edges, then a white fade just before the respawn
+    ctx.fillStyle = 'rgba(0,0,0,' + clamp((-p.y - 10) / 400, 0, 0.45) + ')'; ctx.fillRect(0, 0, VW, VH);
+    if (p.y < -260) { ctx.fillStyle = 'rgba(255,255,255,' + clamp((-p.y - 260) / 100, 0, 1) + ')'; ctx.fillRect(0, 0, VW, VH); }
   }
+  if (v.white > 0) { ctx.fillStyle = 'rgba(255,255,255,' + clamp(v.white, 0, 1) + ')'; ctx.fillRect(0, 0, VW, VH); }
 
   // tag flash
   if (v.flash > 0) {
