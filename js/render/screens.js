@@ -20,7 +20,7 @@ function drawTitle() {
   g.addColorStop(0, '#0a1020'); g.addColorStop(1, '#2a3f58');
   ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
   text('PUPPET TAG', W / 2, 70, 60, '#fff');
-  text('first person - split screen, solo practice or online', W / 2, 98, 15, '#aaa');
+  text((sim.cfg.tpv ? 'third person' : 'first person') + ' - split screen, solo practice or online', W / 2, 98, 15, '#aaa');
   text('P1', 250, 140, 22, sh(COLS[0], 0.2));
   text('W / S  move', 250, 162, 14, '#ddd');
   text('Q / E  turn  (or mouse)', 250, 179, 14, '#ddd');
@@ -42,15 +42,16 @@ function drawTitle() {
   text('Least time spent as IT when the clock ends wins the round. Touch someone while IT to tag.', W / 2, 304, 14, '#bbb');
   text('Dash into IT to shove them. Grab a pillar, spin up, release to fling where you look.', W / 2, 322, 14, '#bbb');
   var solo = sim.cfg.solo, on = Net.mode != 'local';
-  text('[G] mode: ' + (on ? 'ONLINE (' + sim.p.length + ' player' + (sim.p.length == 1 ? '' : 's') + ' in lobby)' : (solo ? 'SOLO PRACTICE (idle dummies, no clock)' : '2 PLAYER SPLIT SCREEN')), W / 2, 346, 17, '#f1c40f');
-  text('[L] mouse look (P1): ' + (sim.cfg.mouse ? 'on - click the game to capture' : 'off'), W / 2, 368, 17, '#f1c40f');
-  text('[T] round time: ' + (solo ? '-' : sim.cfg.time + 's'), 250, 394, 15, solo ? '#777' : '#f1c40f');
-  text('[B] pillars: ' + (sim.cfg.pillars ? 'on' : 'off'), W / 2, 394, 15, '#f1c40f');
-  text('[M] first to: ' + (solo ? '-' : sim.cfg.wins), 710, 394, 15, solo ? '#777' : '#f1c40f');
-  text('[N] players: ' + (on ? sim.p.length + ' connected' : solo ? sim.cfg.n + ' (you + ' + (sim.cfg.n - 1) + ' dummies)' : '2'), 250, 416, 15, solo && !on ? '#f1c40f' : '#777');
-  text('[V] map: ' + MAPDEFS[sim.cfg.map].name, 710, 416, 15, '#f1c40f');
+  text('[G] mode: ' + (on ? 'ONLINE (' + sim.p.length + ' player' + (sim.p.length == 1 ? '' : 's') + ' in lobby)' : (solo ? 'SOLO PRACTICE (idle dummies, no clock)' : '2 PLAYER SPLIT SCREEN')), W / 2, 344, 17, '#f1c40f');
+  text('[L] mouse look (P1): ' + (sim.cfg.mouse ? 'on - click the game to capture' : 'off'), W / 2, 364, 17, '#f1c40f');
+  text('[C] camera: ' + (sim.cfg.tpv ? 'THIRD PERSON' : 'FIRST PERSON'), W / 2, 384, 17, '#f1c40f');
+  text('[T] round time: ' + (solo ? '-' : sim.cfg.time + 's'), 250, 408, 15, solo ? '#777' : '#f1c40f');
+  text('[B] pillars: ' + (sim.cfg.pillars ? 'on' : 'off'), W / 2, 408, 15, '#f1c40f');
+  text('[M] first to: ' + (solo ? '-' : sim.cfg.wins), 710, 408, 15, solo ? '#777' : '#f1c40f');
+  text('[N] players: ' + (on ? sim.p.length + ' connected' : solo ? sim.cfg.n + ' (you + ' + (sim.cfg.n - 1) + ' dummies)' : '2'), 250, 430, 15, solo && !on ? '#f1c40f' : '#777');
+  text('[V] map: ' + MAPDEFS[sim.cfg.map].name, 710, 430, 15, '#f1c40f');
   ctx.globalAlpha = 0.6 + 0.4 * Math.sin(clock * 4);
-  text(Net.mode == 'client' ? 'Waiting for host to start...' : 'Press SPACE to start', W / 2, 455, 26, Net.mode == 'client' ? '#f1c40f' : '#2ecc71');
+  text(Net.mode == 'client' ? 'Waiting for host to start...' : 'Press SPACE to start', W / 2, 458, 26, Net.mode == 'client' ? '#f1c40f' : '#2ecc71');
   ctx.globalAlpha = 1;
 }
 
@@ -89,4 +90,3 @@ function render() {
     text(sim.cfg.mouse && canLock ? 'click or P to resume' : 'P to resume', W / 2, H / 2 + 34, 18, '#aaa');
   }
 }
-
