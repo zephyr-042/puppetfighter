@@ -32,6 +32,7 @@ function onPress(k) {
   var i, j, on = Net.mode != 'local';
   if (k == 27) { paused = false; exitLock(); Input.mx = 0; if (Net.mode == 'client') leaveOnline(); else simToTitle(sim); return; }
   if (sim.mode == 'title') {
+    if (k == 67) { sim.cfg.tpv = !sim.cfg.tpv; return; }     // camera is local-only, so guests may toggle it too
     if (Net.mode == 'client') return;
     if (k == 32 || k == 13) { if (Net.mode == 'host') hostStart(); else simStartMatch(sim); }
     else if (k == 84) sim.cfg.time = TIMES[(TIMES.indexOf(sim.cfg.time) + 1) % TIMES.length];
