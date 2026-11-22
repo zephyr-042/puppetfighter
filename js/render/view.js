@@ -1,0 +1,288 @@
+/* ============================================================================
+   js/render/view.js
+   RENDER (2/3): renderView(pi): the raycaster, sky / floor, obstacles, sprites, HUD for one player view.
+   Loads after: render/draw.js
+   ============================================================================ */
+function renderView(pi) {
+  var p = DP[pi], v = vis[pi], n = DP.length;
+  var i, k;
+  var flopAmt = p.stun > 0 ? Math.sin(PI * (1 - p.stun / p.stunMax)) : 0;
+  var bob = Math.abs(Math.sin(v.phase)) * 3 * v.moving * (p.y <= p.gy + 0.5 ? 1 : 0);
+  var eye = Math.max(14, 55 + p.y - 38 * flopAmt - 22 * v.cr + bob);   // eye height above the floor
+  var focal = F0 * (1 - 0.18 * v.kick);
+  var horizon = VH / 2 + flopAmt * 70 + Math.tan(v.pitch) * focal;   // looking up moves the horizon down
+  var depth = [];
+  var AR = sim.R, fog = AR * 1.67;
+  var viewOffset = (Net.mode == 'host' || Net.mode == 'client') ? 0 : pi * VW;
+
+  ctx.save();
+  ctx.beginPath(); ctx.rect(viewOffset, 0, VW, VH); ctx.clip();
+  var shx = 0, shy = 0;
+  if (shake > 0) { shx = (Math.random() - 0.5) * shake; shy = (Math.random() - 0.5) * shake; }
+  ctx.translate(viewOffset + shx, shy);
+
+  // sky + floor. Roof: an open void with a city skyline; the roof surface is drawn per column below
+  var rect = sim.rect, g, g2 = ctx.createLinearGradient(0, horizon, 0, horizon + VH / 2);
+  if (rect) {
+    g = ctx.createLinearGradient(0, horizon - VH / 2, 0, horizon + VH / 2);
+    g.addColorStop(0, '#0a1020'); g.addColorStop(0.5, '#34506e'); g.addColorStop(1, '#0b1118');
+    ctx.fillStyle = g; ctx.fillRect(-10, -10, VW + 20, VH + 20);
+    g2.addColorStop(0, '#4a5662'); g2.addColorStop(1, '#222c36');
+  } else {
+    g = ctx.createLinearGradient(0, horizon - VH / 2, 0, horizon);
+    g.addColorStop(0, '#0a1020'); g.addColorStop(1, '#2a3f58');
+    ctx.fillStyle = g; ctx.fillRect(-10, -10, VW + 20, horizon + 10);
+    g2.addColorStop(0, '#2b3a4a'); g2.addColorStop(1, '#10161e');
+    ctx.fillStyle = g2; ctx.fillRect(-10, horizon, VW + 20, VH - horizon + 10);
+  }
+
+  // one vertical strip of wall or pillar, hgt = its height above the floor
+  function strip(ci, tp, base, hgt) {
+    var shade = clamp(1.1 - tp / fog, 0.3, 1);
+    var top = horizon - (hgt - eye) * focal / tp;
+    var bot = horizon + eye * focal / tp;
+    ctx.fillStyle = 'rgb(' + Math.round(base[0] * shade) + ',' + Math.round(base[1] * shade) + ',' + Math.round(base[2] * shade) + ')';
+    ctx.fillRect(ci * COLW, top, COLW, bot - top);
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    ctx.fillRect(ci * COLW, top, COLW, Math.max(1, (bot - top) * 0.05));
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.fillRect(ci * COLW, bot - (bot - top) * 0.06, COLW, (bot - top) * 0.06);
+  }
+
+  // one ray per column: arena edge first, then pillars and boxes far to near
+  var pillars = sim.pillars, boxes = sim.boxes || NOBOX, hits = [], hi, wallD = [], hq, bb;
+  var cx = p.x, cz = p.z;
+  if (rect) { cx = clamp(cx, -rect.hw + 2, rect.hw - 2); cz = clamp(cz, -rect.hd + 2, rect.hd - 2); }
+  for (i = 0; i < NCOL; i++) {
+    var cxs = i * COLW + COLW / 2 - VW / 2;
+    var a = Math.atan(cxs / focal);
+    var ca2 = Math.cos(a);
+    var ang = p.a + a;
+    var dx = Math.cos(ang), dz = Math.sin(ang);
+    var tmin, u, alt, wd;
+    if (rect) {
+      var tx = dx > 0.00001 ? (rect.hw - cx) / dx : (dx < -0.00001 ? (-rect.hw - cx) / dx : 1e9);
+      var tz = dz > 0.00001 ? (rect.hd - cz) / dz : (dz < -0.00001 ? (-rect.hd - cz) / dz : 1e9);
+      tmin = Math.max(1, Math.min(tx, tz));
+      u = tx < tz ? cz + dz * tmin : cx + dx * tmin;           // position along the edge, for the stripe pattern
+      alt = Math.floor(u / 36) & 1;
+      wd = Math.max(1, tmin * ca2);
+      var botY = horizon + eye * focal / wd, lipY = horizon + (eye - rect.lip) * focal / wd;
+      if (botY < VH) { ctx.fillStyle = g2; ctx.fillRect(i * COLW, botY, COLW, VH - botY + 1); }   // the roof surface
+      var bld = Math.floor(ang * 6), bh = ((bld * 2654435761) >>> 0) % 1000 / 1000;               // skyline beyond the edge
+      var skyY = horizon - 14 - bh * 100;
+      if (skyY < lipY) {
+        ctx.fillStyle = (bld & 1) ? '#111b29' : '#0d1622';
+        ctx.fillRect(i * COLW, skyY, COLW, lipY - skyY);
+        if (bh > 0.3 && (i & 3) == 1) {
+          ctx.fillStyle = 'rgba(255,214,120,0.55)';
+          for (var wy = skyY + 8; wy < lipY - 4 && wy < skyY + 90; wy += 9) ctx.fillRect(i * COLW, wy, 2, 3);
+        }
+      }
+      strip(i, wd, alt ? [122, 128, 134] : [104, 110, 116], rect.lip);
+    } else {
+      var bt = cx * dx + cz * dz;
+      var cc = cx * cx + cz * cz - AR * AR;
+      tmin = -bt + Math.sqrt(Math.max(0, bt * bt - cc));
+      u = Math.atan2(cz + dz * tmin, cx + dx * tmin);
+      alt = Math.floor((u + PI) * 10 / PI) & 1;
+      wd = Math.max(1, tmin * ca2);
+      strip(i, wd, alt ? [58, 78, 104] : [48, 66, 90], WALL_H);
+    }
+    depth[i] = wallD[i] = wd;
+    hits.length = 0;
+    for (k = 0; k < pillars.length; k++) {
+      var ex = cx - pillars[k].x, ez = cz - pillars[k].z;
+      var b = ex * dx + ez * dz;
+      var c2 = ex * ex + ez * ez - pillars[k].r * pillars[k].r;
+      var disc = b * b - c2;
+      if (disc >= 0) {
+        var t = -b - Math.sqrt(disc);
+        if (t > 0 && t < tmin) hits.push({ t: t, k: k, bx: 0, f: 0 });
+      }
+    }
+    for (k = 0; k < boxes.length; k++) {                      // ray against an axis-aligned box (slab test)
+      bb = boxes[k];
+      var ix = Math.abs(dx) < 1e-6 ? 1e-6 : dx, iz = Math.abs(dz) < 1e-6 ? 1e-6 : dz;
+      var x1 = (bb.x - bb.hw - cx) / ix, x2 = (bb.x + bb.hw - cx) / ix, z1 = (bb.z - bb.hd - cz) / iz, z2 = (bb.z + bb.hd - cz) / iz;
+      var nx0 = Math.min(x1, x2), nz0 = Math.min(z1, z2), tn = Math.max(nx0, nz0), tf = Math.min(Math.max(x1, x2), Math.max(z1, z2));
+      if (tn < tf && tn > 0 && tn < tmin) hits.push({ t: tn, k: k, bx: 1, f: nx0 > nz0 ? 0 : 1 });
+    }
+    hits.sort(function (m, n2) { return n2.t - m.t; });
+    for (hi = 0; hi < hits.length; hi++) {
+      hq = hits[hi];
+      var tp = Math.max(1, hq.t * ca2);
+      if (hq.bx) {
+        bb = boxes[hq.k];
+        var bs = hq.f ? 0.78 : 1;                              // the two face directions get different shading
+        strip(i, tp, [bb.c[0] * bs, bb.c[1] * bs, bb.c[2] * bs], bb.h);
+      } else {
+        var pk = pillars[hq.k];
+        var pu = Math.atan2(cz + dz * hq.t - pk.z, cx + dx * hq.t - pk.x);
+        var palt = Math.floor((pu + PI) * 3 / PI) & 1;
+        var pc = pk.c ? (palt ? [pk.c[0] * 1.12, pk.c[1] * 1.12, pk.c[2] * 1.12] : pk.c) : (palt ? [176, 146, 110] : [150, 122, 92]);
+        // circle maps draw pillars wall-high so their upper section does not reveal the wall texture
+        // behind them (gameplay height is still pk.h). The roof has no wall behind, so it uses true heights.
+        strip(i, tp, pc, rect ? pk.h : WALL_H);
+      }
+      depth[i] = tp;
+    }
+  }
+
+  // screen y of the top of the nearest obstacle in front of distance dF in column ci (1e9 = none, -1e9 = fully blocked)
+  function colLim(ci, dF) {
+    var cs = ci * COLW + COLW / 2 - VW / 2, aa = Math.atan(cs / focal), an = p.a + aa;
+    var ux = Math.cos(an), uz = Math.sin(an), cq = Math.cos(aa), lim = 1e9, kk, o2, ex2, ez2, b2, d3, t3, tp3, y3, ix, iz, x1, x2, z1, z2, tn, tf;
+    if (wallD[ci] < dF) return -1e9;
+    for (kk = 0; kk < pillars.length; kk++) {
+      o2 = pillars[kk];
+      ex2 = cx - o2.x; ez2 = cz - o2.z;
+      b2 = ex2 * ux + ez2 * uz;
+      d3 = b2 * b2 - (ex2 * ex2 + ez2 * ez2 - o2.r * o2.r);
+      if (d3 >= 0) {
+        t3 = -b2 - Math.sqrt(d3); tp3 = t3 * cq;
+        if (t3 > 0 && tp3 < dF) { y3 = horizon - ((rect ? o2.h : WALL_H) - eye) * focal / tp3; if (y3 < lim) lim = y3; }
+      }
+    }
+    for (kk = 0; kk < boxes.length; kk++) {
+      o2 = boxes[kk];
+      ix = Math.abs(ux) < 1e-6 ? 1e-6 : ux; iz = Math.abs(uz) < 1e-6 ? 1e-6 : uz;
+      x1 = (o2.x - o2.hw - cx) / ix; x2 = (o2.x + o2.hw - cx) / ix; z1 = (o2.z - o2.hd - cz) / iz; z2 = (o2.z + o2.hd - cz) / iz;
+      tn = Math.max(Math.min(x1, x2), Math.min(z1, z2)); tf = Math.min(Math.max(x1, x2), Math.max(z1, z2));
+      tp3 = tn * cq;
+      if (tn < tf && tn > 0 && tp3 < dF) { y3 = horizon - (o2.h - eye) * focal / tp3; if (y3 < lim) lim = y3; }
+    }
+    return lim;
+  }
+
+  // opponent sprites, far to near. Low obstacles (crates, steps) hide only the part of a puppet behind them
+  var ca = Math.cos(p.a), sa = Math.sin(p.a);
+  var opps = [], oj, oo, ddx, ddz, nearest = null, offs = [];
+  for (oj = 0; oj < n; oj++) {
+    if (oj == pi) continue;
+    oo = DP[oj];
+    ddx = oo.x - p.x; ddz = oo.z - p.z;
+    opps.push({ j: oj, o: oo, dF: ddx * ca + ddz * sa, dR: -ddx * sa + ddz * ca, d: hyp(ddx, ddz) });
+  }
+  opps.sort(function (m, n2) { return n2.dF - m.dF; });
+  for (k = 0; k < opps.length; k++) {
+    var op = opps[k], o = op.o, dF = op.dF, dR = op.dR, onScreen = false;
+    if (!nearest || op.d < nearest.d) nearest = op;
+    if (dF > 6) {
+      var s = focal / dF;
+      var sxc = VW / 2 + dR * s;
+      var groundY = horizon + (eye - o.y) * s;
+      var half = 28 * s;
+      if (sxc + half > 0 && sxc - half < VW) onScreen = true;
+      var c0 = Math.max(0, Math.floor((sxc - half) / COLW));
+      var c1 = Math.min(NCOL - 1, Math.floor((sxc + half) / COLW));
+      var da = o.a - p.a;
+      var info = { cLat: Math.cos(da), cFwd: Math.sin(da), front: Math.cos(da) < 0,
+                   shift: Math.sin(da) * 4, k: clamp(eye / dF * 1.2, 0.08, 0.6), air: o.y - o.gy };
+      var headY = groundY - 105 * s, run = -1, runLim = 0, lim, hid, ci;
+      for (ci = c0; ci <= c1 + 1; ci++) {
+        lim = ci <= c1 ? colLim(ci, dF) : -1e9;
+        hid = lim <= headY;
+        if (run >= 0 && (hid || Math.abs(lim - runLim) > 6)) {
+          ctx.save();
+          ctx.beginPath(); ctx.rect(run * COLW, 0, (ci - run) * COLW, Math.min(VH, runLim)); ctx.clip();
+          ctx.translate(sxc, groundY);
+          ctx.scale(s, s);
+          drawBody(op.j, o, vis[op.j], info);
+          ctx.restore();
+          run = -1;
+        }
+        if (!hid && run < 0) { run = ci; runLim = lim; }
+      }
+    }
+    if (!onScreen) offs.push(op);
+  }
+
+  // particles
+  for (i = 0; i < parts.length; i++) {
+    var q = parts[i];
+    var qx = q.x - p.x, qz = q.z - p.z;
+    var qF = qx * ca + qz * sa, qR = -qx * sa + qz * ca;
+    if (qF < 5) continue;
+    var qs = focal / qF;
+    var qsx = VW / 2 + qR * qs, qsy = horizon - (q.y - eye) * qs;
+    var col = Math.floor(qsx / COLW);
+    if (col < 0 || col >= NCOL || depth[col] < qF) continue;
+    ctx.globalAlpha = clamp(q.life / q.max, 0, 1);
+    ctx.fillStyle = q.col;
+    var sz = Math.max(1, q.size * qs);
+    ctx.fillRect(qsx - sz / 2, qsy - sz / 2, sz, sz);
+  }
+  ctx.globalAlpha = 1;
+
+  drawHands(pi, p, v, flopAmt);
+  if (p.y < -15) {                                // falling off the roof: fade to black
+    ctx.fillStyle = 'rgba(0,0,0,' + clamp((-p.y - 15) / 110, 0, 0.96) + ')';
+    ctx.fillRect(0, 0, VW, VH);
+  }
+
+  // tag flash
+  if (v.flash > 0) {
+    ctx.fillStyle = 'rgba(255,40,40,' + (v.flash * 0.5) + ')';
+    ctx.fillRect(0, 0, VW, VH);
+  }
+
+  // HUD
+  if (p.isIt) {
+    ctx.strokeStyle = 'rgba(255,50,50,' + (0.6 + 0.3 * Math.sin(clock * 8)) + ')';
+    ctx.lineWidth = 8;
+    ctx.strokeRect(4, 4, VW - 8, VH - 8);
+  }
+  text(NAMES[pi], 14, 28, 20, sh(COLS[pi], 0.2), 'left');
+  for (k = 0; k < (sim.cfg.solo ? 0 : sim.cfg.wins); k++) {
+    ctx.beginPath(); ctx.arc(20 + k * 18, 44, 6, 0, PI * 2);
+    ctx.fillStyle = k < p.score ? sh(COLS[pi], 0.2) : '#2c3e50'; ctx.fill();
+    ctx.strokeStyle = '#7f8c8d'; ctx.lineWidth = 1; ctx.stroke();
+  }
+  if (!sim.cfg.solo) text('IT time ' + p.itT.toFixed(1) + 's', 14, 64, 12, '#9fb3c8', 'left');
+  if (sim.mode == 'play' || sim.mode == 'countdown') {
+    text(p.isIt ? 'TAG THEM!' : 'RUN!', VW / 2, 70, 22, p.isIt ? '#ff5252' : '#2ecc71');
+  }
+  // crosshair
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.fillRect(VW / 2 - 1, VH / 2 - 1, 3, 3);
+  // dash bar
+  var bw = 120, bx = VW / 2 - bw / 2;
+  ctx.fillStyle = '#222'; ctx.fillRect(bx, VH - 22, bw, 7);
+  ctx.fillStyle = p.dashCd > 0 ? '#7f8c8d' : '#f1c40f';
+  ctx.fillRect(bx, VH - 22, bw * (1 - Math.max(0, p.dashCd) / DASH_CD), 7);
+  text('dash', VW / 2, VH - 28, 11, '#aaa');
+  // speed readout (handy for finding techniques)
+  text('spd ' + Math.round(hyp(p.vx, p.vz)), 14, VH - 14, 13, '#9fb3c8', 'left');
+  // nearest opponent distance
+  if (nearest) text((sim.cfg.solo ? 'dummy ' : 'opp ') + Math.round(nearest.d / 10) + 'm', VW - 14, VH - 14, 13, sh(COLS[nearest.j], 0.3), 'right');
+  // arrows for opponents that are out of view, stacked at the screen edges
+  var ai, ay, ax, ro;
+  for (ai = 0; ai < offs.length; ai++) {
+    ro = offs[ai];
+    ay = VH / 2 - (offs.length - 1) * 16 + ai * 32;
+    if (ro.dR > 0) { ax = VW - 20; poly([ax - 14, ay - 12, ax + 8, ay, ax - 14, ay + 12], sh(COLS[ro.j], 0.2)); }
+    else { ax = 20; poly([ax + 14, ay - 12, ax - 8, ay, ax + 14, ay + 12], sh(COLS[ro.j], 0.2)); }
+  }
+  // events / state text
+  if (msg.t < 0.9) {
+    ctx.globalAlpha = clamp(1 - msg.t / 0.9, 0, 1);
+    text(msg.txt, VW / 2, 130, 44, msg.col);
+    ctx.globalAlpha = 1;
+  }
+  if (sim.mode == 'countdown') {
+    var cn = Math.max(1, Math.ceil(3 - sim.mt));
+    text(cn, VW / 2, VH / 2 - 20, 80, '#fff');
+  } else if (sim.mode == 'play' && sim.mt < 0.7 && !sim.cfg.solo) {
+    text('GO!', VW / 2, VH / 2 - 20, 80, '#2ecc71');
+  } else if (sim.mode == 'roundend') {
+    ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fillRect(0, 0, VW, VH);
+    text(sim.winner == pi ? 'ROUND WON' : 'ROUND LOST', VW / 2, VH / 2, 40, sim.winner == pi ? '#2ecc71' : '#ff5252');
+  } else if (sim.mode == 'matchend') {
+    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 0, VW, VH);
+    text(sim.winner == pi ? 'VICTORY' : 'DEFEAT', VW / 2, VH / 2, 54, sim.winner == pi ? '#2ecc71' : '#ff5252');
+    text(n == 2 ? p.score + ' - ' + DP[1 - pi].score : p.score + ' rounds won', VW / 2, VH / 2 + 40, 26, '#fff');
+  }
+  ctx.restore();
+}
+
