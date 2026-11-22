@@ -1,6 +1,6 @@
 /* ============================================================================
    js/sim/physics.js
-   SIM: per-player movement physics (stepP): walk, dash, jump, slide, pillar grab, boxes, roof edge, falling.
+   SIM: per-player movement physics (stepP): walk, dash, jump, slide, pillar grab, boxes, roof edge, floor holes, falling.
    Loads after: core.js, sim/maps.js, sim/state.js
 
   Movement verbs (always available, they stack):
@@ -12,7 +12,7 @@
    ============================================================================ */
 function tryDash(s, i, fw, st) {
   var p = s.p[i];
-  if (p.dashCd > 0 || p.stun > 0 || p.grab >= 0) return;
+  if (p.dashCd > 0 || p.stun > 0 || p.grab >= 0 || p.fell) return;
   var ca = Math.cos(p.a), sa = Math.sin(p.a);
   var dx = ca * fw - sa * st, dz = sa * fw + ca * st, l = hyp(dx, dz);
   if (l < 0.01) { dx = ca; dz = sa; } else { dx /= l; dz /= l; }
@@ -22,8 +22,11 @@ function tryDash(s, i, fw, st) {
 
 // height of the surface under a player (0 = floor, or the top of a pillar they are above)
 function support(s, p) {
-  var j, pl, b, bx = s.boxes || NOBOX, gl = 0;
+  var j, pl, b, bx = s.boxes || NOBOX, hs = s.holes || NOBOX, gl = 0;
   if (s.rect && (Math.abs(p.x) > s.rect.hw || Math.abs(p.z) > s.rect.hd)) gl = -1000;   // past the roof edge: nothing to stand on
+  for (j = 0; j < hs.length; j++) {                                                      // over a floor hole (skylight): same
+    if (Math.abs(p.x - hs[j].x) < hs[j].hw && Math.abs(p.z - hs[j].z) < hs[j].hd) gl = -1000;
+  }
   for (j = 0; j < s.pillars.length; j++) {
     pl = s.pillars[j];
     if (hyp(p.x - pl.x, p.z - pl.z) < pl.r + 8 && p.y >= pl.h - 6 && pl.h > gl) gl = pl.h;
@@ -40,17 +43,20 @@ function stepP(s, i, bits, tdel, dt) {
   var wantSlide = false, wantGrab = false;
   if (p.stun > 0) p.stun -= dt;
   var can = s.mode == 'play' && p.stun <= 0;
-  if (can) {
+  var ctl = can && !p.fell;        // once you are falling off the building there is no dash / jump / slide / grab / steering
+  if (ctl) {
     if (bits & 1) fw += 1;
     if (bits & 2) fw -= 1;
     if (bits & 16) st -= 1;
     if (bits & 32) st += 1;
-    if (bits & 4) tn -= 1;
-    if (bits & 8) tn += 1;
     if (bits & 64) tryDash(s, i, fw, st);
     if (bits & 128) p.jbuf = 0.12;
     wantSlide = (bits & 256) != 0;
     wantGrab = (bits & 512) != 0;
+  }
+  if (can) {                       // looking around still works while falling
+    if (bits & 4) tn -= 1;
+    if (bits & 8) tn += 1;
   }
   if (p.jbuf > 0) p.jbuf -= dt;
   if (p.gcd > 0) p.gcd -= dt;
@@ -153,6 +159,11 @@ function stepP(s, i, bits, tdel, dt) {
   }
   if (p.grab >= 0 && p.dashCd > 0) p.dashCd -= dt;
 
+  if (p.fell && s.rect) {          // falling off the building: drift away from the wall, slightly damped
+    if (Math.abs(p.x) > s.rect.hw) p.vx += (p.x > 0 ? 1 : -1) * 90 * dt;
+    if (Math.abs(p.z) > s.rect.hd) p.vz += (p.z > 0 ? 1 : -1) * 90 * dt;
+    p.vx *= 0.995; p.vz *= 0.995;
+  }
   if (s.rect) {
     // roof: a low lip blocks anything below it. Jump over it and there is nothing to stand on
     var rhw = s.rect.hw, rhd = s.rect.hd;
@@ -204,20 +215,29 @@ function stepP(s, i, bits, tdel, dt) {
 
   // vertical: gravity, floor, pillar tops
   var gl = support(s, p), wasAir = !grounded, iv = p.vy;
-  if (p.grab < 0) { p.vy -= (p.dashT > 0 ? 250 : 900) * dt; p.y += p.vy * dt; }
-  if (p.y <= gl) {
+  if (p.grab < 0) {
+    p.vy -= (p.dashT > 0 ? 250 : 900) * dt;
+    if (p.fell && p.vy < -380) p.vy = -380;                     // terminal velocity: the drop lasts about a second
+    p.y += p.vy * dt;
+  }
+  if (p.y <= gl && !p.fell) {
     if (p.vy < 0) p.vy = 0;
     p.y = gl;
     if (wasAir && iv < -40) { p.coast = 0.15; s.ev.push({ t: 'land', i: i, x: p.x, z: p.z, v: -iv }); }
   }
   p.gy = gl;
-  // fell off the roof: respawn dazed at the spawn point. The sim then makes the faller IT (simStep)
-  if (s.rect && p.y < -260) {
-    var sp = spawnPos(s, i, s.p.length);
-    p.x = sp.x; p.z = sp.z; p.a = sp.a; p.y = 0; p.gy = 0; p.vx = p.vz = p.vy = 0;
-    p.dashT = 0; p.grab = -1; p.sl = false; p.coast = 0; p.jbuf = 0;
-    setStun(p, 0.8, 1); p.fell = true;
+  // no floor under you (past the roof edge or over the skylight): start falling. The sim makes the faller IT (simStep)
+  if (gl <= -999 && p.y < -10 && !p.fell) {
+    p.fell = true; p.fnow = true; p.grab = -1; p.dashT = 0; p.sl = false; p.jbuf = 0;
     s.ev.push({ t: 'fall', i: i, x: p.x, z: p.z });
+  }
+  // after about 1 s of falling (y < -380): respawn above the spawn point, dazed
+  if (p.fell && p.y < -380) {
+    var sp = spawnPos(s, i, s.p.length);
+    p.x = sp.x; p.z = sp.z; p.a = sp.a; p.y = 60; p.gy = 0; p.vx = p.vz = p.vy = 0;
+    p.fell = false; p.dashT = 0; p.grab = -1; p.sl = false; p.coast = 0; p.jbuf = 0;
+    setStun(p, 0.7, 1);
+    s.ev.push({ t: 'respawn', i: i, x: p.x, z: p.z });
   }
 }
 
