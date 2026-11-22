@@ -22,8 +22,8 @@
   <div id="netStatus" style="margin-top:8px;color:#9fb3c8">Local mode is unchanged. Create or join a room to play online.</div>
   <div id="roomActions" style="margin-top:6px;display:none">Room code: <strong id="roomLabel" style="color:#2ecc71;letter-spacing:2px"></strong> — share this code with your friends. <button id="leaveRoom">Leave room</button></div>
 </div>
-<p>P1: W/S move, Q/E or mouse turn, A/D strafe, F dash, Space jump, Shift slide (hold), C grab pillar (hold)</p>
-<p>P2: Up/Down move, Left/Right turn, , / . strafe, Enter dash, / jump, ; slide (hold), ' grab (hold) &nbsp;|&nbsp; P pause, R reset (solo), Esc title, F11 fullscreen</p>
+<p>P1: W/S move, Q/E or mouse turn, A/D strafe, F dash, Space jump, Shift slide (hold), C grab pillar (hold), T/G or mouse look up/down</p>
+<p>P2: Up/Down move, Left/Right turn, , / . strafe, Enter dash, / jump, ; slide (hold), ' grab (hold), [ / ] look up/down &nbsp;|&nbsp; P pause, R reset (solo), Esc title, F11 fullscreen</p>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
@@ -94,6 +94,8 @@
      v5  online for up to 6 players: WebRTC star (host <-> each guest) with Supabase used only
          for signalling, lobby, compact per-guest snapshots, ping display, drop handling, and a
          relay fallback through Supabase for guests whose direct connection fails.
+     v6  vertical look (pitch): view-only, stored in vis[i].pitch, applied as a y-shear of the
+         horizon in renderView. Not part of the sim state or the network.
 
    NEXT IDEAS
      - Test with friends on different networks. If direct connections fail (strict NATs), add a
@@ -116,6 +118,8 @@
      - The relay fallback broadcasts every message to everyone in the room, so use it for 2
        players only. Joining is only possible from the lobby (title screen), not mid-match.
      - Online matches cannot be paused.
+     - Pitch is a y-shear (horizon shift), not true 3D: walls stay vertical, so it is capped at
+       +-0.6 rad (PITCH_MAX). Other puppets do not show where you are looking.
    =================================================================================== */
 var cv = document.getElementById('c');
 var ctx = cv.getContext('2d');
@@ -126,6 +130,7 @@ var WALL_H = 100, SPRITE_H = 80;
 var COLS = [[52, 152, 219], [230, 126, 34], [46, 204, 113], [155, 89, 182], [241, 196, 15], [26, 188, 156]];
 var NAMES = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6'];
 var TIMES = [20, 30, 45, 60], WINS = [1, 2, 3, 5];
+var MOUSE_SENS = 0.005, PITCH_MAX = 0.6, PITCH_KEY = 1.6;   // radians per pixel, max look up/down, keyboard look speed
 
 function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
 function hyp(x, y) { return Math.sqrt(x * x + y * y); }
@@ -471,7 +476,7 @@ var MAPS = [
   { f: 87, b: 83, l: 81, r: 69, sl: 65, sr: 68, act: [70], jump: [32], slide: 16, grab: 67 },
   { f: 38, b: 40, l: 37, r: 39, sl: 188, sr: 190, act: [13], jump: [191], slide: 186, grab: 222 }
 ];
-var Input = { keys: {}, dashQ: [false, false], jumpQ: [false, false], mx: 0, locked: false, drag: false, lx: 0 };
+var Input = { keys: {}, dashQ: [false, false], jumpQ: [false, false], mx: 0, locked: false, drag: false, lx: 0, ly: 0, my: 0 };
 function readBits(i) {
   var k = Input.keys, m = MAPS[i], b = 0;
   if (k[m.f]) b |= 1;
@@ -488,7 +493,7 @@ function readBits(i) {
 }
 function readIn(i) {
   var t = 0;
-  if (i == 0 && sim.cfg.mouse) { t = clamp(Input.mx * 0.005, -1.2, 1.2); Input.mx = 0; }
+  if (i == 0 && sim.cfg.mouse) { t = clamp(Input.mx * MOUSE_SENS, -1.2, 1.2); Input.mx = 0; }
   return { b: readBits(i), t: t };
 }
 
@@ -997,7 +1002,7 @@ window.addEventListener('beforeunload', sayBye);
 var vis = [], parts = [], shake = 0, clock = 0, msg = { txt: '', col: '#fff', t: 99 };
 function mkVis() {
   return { lvx: 0, lvz: 0, phase: 0, moving: 0, kick: 0, flash: 0,
-           hf: 0, hfv: 0, hl: 0, hlv: 0, df: 0, dfv: 0, dl: 0, dlv: 0, cr: 0 };
+           hf: 0, hfv: 0, hl: 0, hlv: 0, df: 0, dfv: 0, dl: 0, dlv: 0, cr: 0, pitch: 0 };
 }
 ensureVis(MAXP);
 
@@ -1026,6 +1031,21 @@ function updateVis(dt) {
     v.flash = Math.max(0, v.flash - dt * 2.5);
     v.cr += ((p.sl ? 1 : 0) - v.cr) * Math.min(1, dt * 12);
   }
+  // vertical look: view-only state, never part of the sim or the network. Mouse (local player) or T/G;
+  // in local split screen P2 uses [ and ]
+  var lv = Net.mode == 'client' ? Net.me : 0, kk = Input.keys;
+  if (sim.mode == 'title') { for (i = 0; i < vis.length; i++) vis[i].pitch = 0; }
+  else {
+    if (sim.cfg.mouse) vis[lv].pitch -= Input.my * MOUSE_SENS;
+    if (kk[84]) vis[lv].pitch += PITCH_KEY * dt;
+    if (kk[71]) vis[lv].pitch -= PITCH_KEY * dt;
+    if (Net.mode == 'local' && !sim.cfg.solo) {
+      if (kk[219]) vis[1].pitch += PITCH_KEY * dt;
+      if (kk[221]) vis[1].pitch -= PITCH_KEY * dt;
+    }
+    for (i = 0; i < vis.length; i++) vis[i].pitch = clamp(vis[i].pitch, -PITCH_MAX, PITCH_MAX);
+  }
+  Input.my = 0;
   clock += dt;
   msg.t += dt;
   if (shake > 0) { shake -= dt * 40; if (shake < 0) shake = 0; }
@@ -1232,7 +1252,7 @@ function drawHands(pi, p, v, horizonShift) {
     s = i == 0 ? -1 : 1;
     var sx = VW / 2 + s * VW * 0.3, sy = VH + 20;
     var hx = VW / 2 + s * VW * 0.2 + v.hl * 3 + bobx * s * 0.5;
-    var hy = VH - 80 - v.hf * 3 + boby + lowHands;
+    var hy = VH - 80 - v.hf * 3 + boby + lowHands + v.pitch * 70;
     if (p.dashT > 0) { hx = VW / 2 + s * VW * 0.1; hy = VH - 190; }
     if (p.grab >= 0) { hx = VW / 2 + s * VW * 0.06; hy = VH - 150; }
     if (p.stun > 0) { hx = VW / 2 + s * (120 + Math.sin(clock * 20) * 30); hy = VH - 200 + Math.cos(clock * 18 + i) * 40; }
@@ -1250,8 +1270,8 @@ function renderView(pi) {
   var flopAmt = p.stun > 0 ? Math.sin(PI * (1 - p.stun / p.stunMax)) : 0;
   var bob = Math.abs(Math.sin(v.phase)) * 3 * v.moving * (p.y <= p.gy + 0.5 ? 1 : 0);
   var eye = Math.max(14, 55 + p.y - 38 * flopAmt - 22 * v.cr + bob);   // eye height above the floor
-  var horizon = VH / 2 + flopAmt * 70;
   var focal = F0 * (1 - 0.18 * v.kick);
+  var horizon = VH / 2 + flopAmt * 70 + Math.tan(v.pitch) * focal;   // looking up moves the horizon down
   var depth = [];
   var AR = sim.R, fog = AR * 1.67;
   var viewOffset = (Net.mode == 'host' || Net.mode == 'client') ? 0 : pi * VW;
@@ -1263,10 +1283,10 @@ function renderView(pi) {
   ctx.translate(viewOffset + shx, shy);
 
   // sky + floor
-  var g = ctx.createLinearGradient(0, 0, 0, horizon);
+  var g = ctx.createLinearGradient(0, horizon - VH / 2, 0, horizon);
   g.addColorStop(0, '#0a1020'); g.addColorStop(1, '#2a3f58');
   ctx.fillStyle = g; ctx.fillRect(-10, -10, VW + 20, horizon + 10);
-  var g2 = ctx.createLinearGradient(0, horizon, 0, VH);
+  var g2 = ctx.createLinearGradient(0, horizon, 0, horizon + VH / 2);
   g2.addColorStop(0, '#2b3a4a'); g2.addColorStop(1, '#10161e');
   ctx.fillStyle = g2; ctx.fillRect(-10, horizon, VW + 20, VH - horizon + 10);
 
@@ -1408,7 +1428,7 @@ function renderView(pi) {
   }
   // crosshair
   ctx.fillStyle = 'rgba(255,255,255,0.5)';
-  ctx.fillRect(VW / 2 - 1, horizon - 1, 3, 3);
+  ctx.fillRect(VW / 2 - 1, VH / 2 - 1, 3, 3);
   // dash bar
   var bw = 120, bx = VW / 2 - bw / 2;
   ctx.fillStyle = '#222'; ctx.fillRect(bx, VH - 22, bw, 7);
@@ -1475,6 +1495,7 @@ function drawTitle() {
   text('Space  jump', 250, 230, 14, '#ddd');
   text('Shift  slide (hold)', 250, 247, 14, '#ddd');
   text('C  grab pillar (hold)', 250, 264, 14, '#ddd');
+  text('T / G  look up / down (or mouse)', 250, 281, 14, '#ddd');
   text('P2', 710, 140, 22, sh(COLS[1], 0.2));
   text('Up / Down  move', 710, 162, 14, '#ddd');
   text('Left / Right  turn', 710, 179, 14, '#ddd');
@@ -1483,8 +1504,9 @@ function drawTitle() {
   text('/  jump', 710, 230, 14, '#ddd');
   text(';  slide (hold)', 710, 247, 14, '#ddd');
   text("'  grab pillar (hold)", 710, 264, 14, '#ddd');
-  text('Least time spent as IT when the clock ends wins the round. Touch someone while IT to tag.', W / 2, 296, 14, '#bbb');
-  text('Dash into IT to shove them. Grab a pillar, spin up, release to fling where you look.', W / 2, 314, 14, '#bbb');
+  text('[ / ]  look up / down', 710, 281, 14, '#ddd');
+  text('Least time spent as IT when the clock ends wins the round. Touch someone while IT to tag.', W / 2, 304, 14, '#bbb');
+  text('Dash into IT to shove them. Grab a pillar, spin up, release to fling where you look.', W / 2, 322, 14, '#bbb');
   var solo = sim.cfg.solo, on = Net.mode != 'local';
   text('[G] mode: ' + (on ? 'ONLINE (' + sim.p.length + ' player' + (sim.p.length == 1 ? '' : 's') + ' in lobby)' : (solo ? 'SOLO PRACTICE (idle dummies, no clock)' : '2 PLAYER SPLIT SCREEN')), W / 2, 346, 17, '#f1c40f');
   text('[L] mouse look (P1): ' + (sim.cfg.mouse ? 'on - click the game to capture' : 'off'), W / 2, 368, 17, '#f1c40f');
@@ -1602,7 +1624,7 @@ cv.onmousedown = function (e) {
   // Always enable drag as a fallback. Some browsers expose the Pointer Lock
   // API but refuse the request (for example in restricted preview frames).
   Input.drag = true;
-  Input.lx = e.clientX;
+  Input.lx = e.clientX; Input.ly = e.clientY;
   if (canLock && !Input.locked) {
     try { (cv.requestPointerLock || cv.mozRequestPointerLock).call(cv); } catch (err) {}
   }
@@ -1612,8 +1634,8 @@ document.onmouseup = function () { Input.drag = false; };
 document.onmousemove = function (e) {
   e = e || window.event;
   if (paused || sim.mode == 'title') return;
-  if (Input.locked) Input.mx += (e.movementX || e.mozMovementX || 0);
-  else if (Input.drag) { Input.mx += e.clientX - Input.lx; Input.lx = e.clientX; }
+  if (Input.locked) { Input.mx += (e.movementX || e.mozMovementX || 0); Input.my += (e.movementY || e.mozMovementY || 0); }
+  else if (Input.drag) { Input.mx += e.clientX - Input.lx; Input.lx = e.clientX; Input.my += e.clientY - Input.ly; Input.ly = e.clientY; }
 };
 
 document.onkeydown = function (e) {
