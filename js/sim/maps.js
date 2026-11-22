@@ -10,7 +10,10 @@
 var MAPDEFS = [{ name: 'Arena', R: 270 }, { name: 'Large', R: 420 },
   // Roof: a Gang Beasts style rooftop, 1520 x 1000. R is only used for fog distance on rect maps.
   { name: 'Roof', R: 900, rect: { hw: 760, hd: 500, lip: 12 },
-    spawns: [{ x: -640, z: 30 }, { x: 640, z: 40 }, { x: -60, z: 330 }, { x: -250, z: -250 }, { x: 120, z: -20 }, { x: 300, z: 330 }] }];
+    spawns: [{ x: -640, z: 30 }, { x: 640, z: 40 }, { x: -60, z: 330 }, { x: -250, z: -250 }, { x: 120, z: -20 }, { x: 300, z: 330 }] },
+  // Complex: skyline parkour map, 2100 x 1360, 180-degree point symmetric (every object has a mirror at (-x,-z)).
+  { name: 'Complex', R: 1100, rect: { hw: 1050, hd: 680, lip: 14 },
+    spawns: [{ x: -900, z: -300 }, { x: 900, z: 300 }, { x: -900, z: 300 }, { x: 900, z: -300 }, { x: 0, z: -580 }, { x: 0, z: 580 }] }];
 var NOBOX = [];
 function mapPillars(k) {
   var out = [], i, a;
@@ -23,6 +26,15 @@ function mapPillars(k) {
     for (i = 0; i < 4; i++) { a = PI / 4 + i * PI / 2; out.push({ x: Math.cos(a) * 150, z: Math.sin(a) * 150, r: 22, h: 40 }); }
     for (i = 0; i < 8; i++) { a = PI / 8 + i * PI / 4; out.push({ x: Math.cos(a) * 300, z: Math.sin(a) * 300, r: 26, h: 40 }); }
     out.push({ x: 0, z: 0, r: 30, h: 40 });
+  } else if (k == 3) {
+    // Complex: swing pillars (grab, orbit, release to fling). Half the set, mirrored through the origin below.
+    var half = [{ x: 250, z: -200, c: [205, 205, 210] },     // flank the central catwalk
+                { x: 930, z: -540, c: [200, 120, 60] },      // outer corners: slingshot round the corner platforms
+                { x: 930, z: 540, c: [200, 120, 60] }];
+    for (i = 0; i < half.length; i++) {
+      out.push({ x: half[i].x, z: half[i].z, r: 24, h: 140, c: half[i].c });
+      out.push({ x: -half[i].x, z: -half[i].z, r: 24, h: 140, c: half[i].c });
+    }
   } else {
     // roof. Everything round can be grabbed (orbit it, release to fling). Orbit radius reaches ~r+62,
     // so tall things stay >= 90 from the edge.
@@ -65,11 +77,28 @@ function mapBoxes(k) {
     b(-250, -330, 100, 14, 26, P); b(260, 60, 14, 90, 26, P); b(-300, 120, 80, 14, 26, P);
     b(-20, -230, 55, 35, 40, A); b(330, -20, 45, 45, 30, A);
   }
+  if (k == 3) {
+    var BR = [128, 88, 74], DK = [112, 118, 128], T1 = [138, 144, 152], T2 = [168, 174, 182], LW = [98, 106, 118], AC = [150, 154, 160];
+    // mirrored pair: the same box at (x,z) and (-x,-z)
+    var m = function (x, z, hw, hd, h, c) { b(x, z, hw, hd, h, c); b(-x, -z, hw, hd, h, c); };
+    // central catwalk: skybridge (92) with an upper deck (92) each side, tier-1 (48) landings, step crates (24)
+    b(0, 0, 90, 22, 92, T2);
+    m(200, 0, 110, 70, 92, T2);
+    m(400, 0, 90, 70, 48, T1);
+    m(400, -130, 36, 36, 24, W); m(460, 110, 36, 36, 24, W);
+    // sightline blockers: 130 high, cannot be jumped from the ground (only from the 92 deck or by pillar fling)
+    m(420, -300, 70, 55, 130, BR); m(640, 250, 55, 60, 130, BR);
+    // corner platforms (48), each next to a swing pillar
+    m(760, -470, 80, 60, 48, DK); m(760, 470, 80, 60, 48, DK);
+    // low walls and AC units: dash lanes, cover, quick vaults
+    m(760, -40, 14, 140, 26, LW); m(0, -480, 150, 14, 26, LW); m(230, -410, 60, 40, 40, AC);
+  }
   return out;
 }
 // holes in the floor: stand over one and you fall (like the Roof skylight)
 function mapHoles(k) {
   var out = [];
   if (k == 2) out.push({ x: -100, z: -30, hw: 110, hd: 70 });
+  if (k == 3) { out.push({ x: 0, z: -260, hw: 70, hd: 55 }); out.push({ x: 0, z: 260, hw: 70, hd: 55 }); }   // skylights beside the catwalk
   return out;
 }
