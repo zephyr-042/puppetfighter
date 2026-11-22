@@ -7,7 +7,7 @@
 var vis = [], parts = [], shake = 0, clock = 0, msg = { txt: '', col: '#fff', t: 99 };
 function mkVis() {
   return { lvx: 0, lvz: 0, phase: 0, moving: 0, kick: 0, flash: 0,
-           hf: 0, hfv: 0, hl: 0, hlv: 0, df: 0, dfv: 0, dl: 0, dlv: 0, cr: 0, pitch: 0 };
+           hf: 0, hfv: 0, hl: 0, hlv: 0, df: 0, dfv: 0, dl: 0, dlv: 0, cr: 0, pitch: 0, white: 0 };
 }
 ensureVis(MAXP);
 
@@ -35,6 +35,7 @@ function updateVis(dt) {
     if (p.dashT > 0) v.kick = 1; else v.kick = Math.max(0, v.kick - dt * 3);
     v.flash = Math.max(0, v.flash - dt * 2.5);
     v.cr += ((p.sl ? 1 : 0) - v.cr) * Math.min(1, dt * 12);
+    v.white = Math.max(0, v.white - dt * 1.6);          // white fade-in after a respawn
   }
   // vertical look: view-only state, never part of the sim or the network. Mouse (local player) or T/G;
   // in local split screen P2 uses [ and ]
@@ -48,6 +49,7 @@ function updateVis(dt) {
       if (kk[219]) vis[1].pitch += PITCH_KEY * dt;
       if (kk[221]) vis[1].pitch -= PITCH_KEY * dt;
     }
+    for (i = 0; i < DP.length; i++) if (DP[i].fell) vis[i].pitch += (-PITCH_MAX - vis[i].pitch) * Math.min(1, dt * 3);   // look down while falling
     for (i = 0; i < vis.length; i++) vis[i].pitch = clamp(vis[i].pitch, -PITCH_MAX, PITCH_MAX);
   }
   Input.my = 0;
