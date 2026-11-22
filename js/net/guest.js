@@ -49,7 +49,7 @@ function predStep(ps, inp) {
   if (ps.mode == 'title') return;
   ps.mt += STEP;
   stepP(ps, Net.me, inp.b, inp.t, STEP);
-  ps.p[Net.me].fell = false;
+  ps.p[Net.me].fnow = false;
   if (ps.mode == 'countdown' && ps.mt >= 3) { ps.mode = 'play'; ps.mt = 0; }
 }
 function clientTick() {
@@ -114,7 +114,7 @@ function reconcile(inc) {
   while (Net.pending.length && Net.pending[0].s <= (inc.ack || 0)) Net.pending.shift();
   np = JSON.parse(JSON.stringify(sim.p[Net.me]));
   rp = sim.p.slice(); rp[Net.me] = np;
-  rs = { mode: sim.mode, mt: sim.mt, R: sim.R, rect: sim.rect, pillars: sim.pillars, boxes: sim.boxes, cfg: sim.cfg, ev: [], p: rp };
+  rs = { mode: sim.mode, mt: sim.mt, R: sim.R, rect: sim.rect, spawns: sim.spawns, holes: sim.holes, pillars: sim.pillars, boxes: sim.boxes, cfg: sim.cfg, ev: [], p: rp };
   for (i = 0; i < Net.pending.length; i++) { predStep(rs, Net.pending[i]); rs.ev.length = 0; }
   if (old) {
     // keep what is on screen continuous: error = shown position before - corrected position now
