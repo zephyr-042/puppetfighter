@@ -1,16 +1,73 @@
 /* ============================================================================
    js/render/view.js
-   RENDER (2/3): renderView(pi): the raycaster, sky / floor, box + pillar tops, floor holes, falling-off-the-building view, sprites, HUD.
+   RENDER (2/3): renderView(pi): the raycaster, third-person chase camera, sky / floor, box + pillar tops, floor holes, falling-off-the-building view, sprites, HUD.
    Loads after: render/draw.js
    ============================================================================ */
+// ---------------------------------------------------------------- third-person chase camera (view only)
+// How far one ray from the puppet straight backwards (dx, dz) can travel before it meets the arena
+// boundary, a pillar or a box that is tall enough to be in the way. Low things (below the puppet's
+// eye line) are ignored: the camera boom passes over them.
+function camClearance(p, dx, dz, eyeP) {
+  var rect = sim.rect, pillars = sim.pillars, boxes = sim.boxes || NOBOX, best, t, b, c, sq, k, o, hh, ex, ez, ix, iz, x1, x2, z1, z2, tn, tf;
+  if (rect) {
+    best = dx > 1e-5 ? (rect.hw - p.x) / dx : (dx < -1e-5 ? (-rect.hw - p.x) / dx : 1e9);
+    t = dz > 1e-5 ? (rect.hd - p.z) / dz : (dz < -1e-5 ? (-rect.hd - p.z) / dz : 1e9);
+    if (t < best) best = t;
+  } else {
+    b = p.x * dx + p.z * dz; c = p.x * p.x + p.z * p.z - sim.R * sim.R;
+    best = -b + Math.sqrt(Math.max(0, b * b - c));
+  }
+  for (k = 0; k < pillars.length; k++) {
+    o = pillars[k];
+    hh = rect ? o.h : WALL_H;                              // circle maps draw pillars wall-high, so they block the view
+    if (hh <= eyeP - 10) continue;
+    ex = p.x - o.x; ez = p.z - o.z;
+    b = ex * dx + ez * dz; sq = b * b - (ex * ex + ez * ez - o.r * o.r);
+    if (sq >= 0) { t = -b - Math.sqrt(sq); if (t > 0 && t < best) best = t; }
+  }
+  for (k = 0; k < boxes.length; k++) {
+    o = boxes[k];
+    if (o.h <= eyeP - 10) continue;
+    ix = Math.abs(dx) < 1e-6 ? 1e-6 : dx; iz = Math.abs(dz) < 1e-6 ? 1e-6 : dz;
+    x1 = (o.x - o.hw - p.x) / ix; x2 = (o.x + o.hw - p.x) / ix; z1 = (o.z - o.hd - p.z) / iz; z2 = (o.z + o.hd - p.z) / iz;
+    tn = Math.max(Math.min(x1, x2), Math.min(z1, z2)); tf = Math.min(Math.max(x1, x2), Math.max(z1, z2));
+    if (tn < tf && tn > 0 && tn < best) best = tn;         // (standing on top of a box: tn < 0, so it never blocks)
+  }
+  return best;
+}
+// Camera position for the puppet p: CAM_DIST straight behind it, pulled in so it never ends up outside
+// the map or inside something tall. It moves in at once but eases back out (v.camD), so sliding along
+// a wall does not make the view pump. Returns {x, z, d}: d is the real distance from the puppet.
+function chaseCam(p, v, eyeP) {
+  var dx = -Math.cos(p.a), dz = -Math.sin(p.a);
+  var clear = camClearance(p, dx, dz, eyeP);
+  var want = Math.min(CAM_DIST, Math.max(CAM_MIN, clear - CAM_PAD), Math.max(0, clear - 1));   // never past the obstacle itself
+  v.camD = want < v.camD ? want : v.camD + (want - v.camD) * 0.1;
+  var x = p.x + dx * v.camD, z = p.z + dz * v.camD, r, lim;
+  if (sim.rect) { x = clamp(x, -sim.rect.hw + 2, sim.rect.hw - 2); z = clamp(z, -sim.rect.hd + 2, sim.rect.hd - 2); }
+  else { r = hyp(x, z); lim = sim.R - 2; if (r > lim) { x *= lim / r; z *= lim / r; } }
+  return { x: x, z: z, d: hyp(x - p.x, z - p.z) };
+}
+
 function renderView(pi) {
   var p = DP[pi], v = vis[pi], n = DP.length;
   var i, k;
   var flopAmt = p.stun > 0 ? Math.sin(PI * (1 - p.stun / p.stunMax)) : 0;
   var bob = Math.abs(Math.sin(v.phase)) * 3 * v.moving * (p.y <= p.gy + 0.5 ? 1 : 0);
-  var eye = p.fell ? 55 + p.y : Math.max(14, 55 + p.y - 38 * flopAmt - 22 * v.cr + bob);   // eye height above the roof level
+  var tpv = !!sim.cfg.tpv && !p.fell;              // third-person chase camera (a fall uses the first-person view)
+  var eye = p.fell ? 55 + p.y : Math.max(14, 55 + p.y - 38 * flopAmt - 22 * v.cr + bob);   // CAMERA height above the roof level
   var focal = F0 * (1 - 0.18 * v.kick);
-  var horizon = VH / 2 + flopAmt * 70 + Math.tan(v.pitch) * focal;   // looking up moves the horizon down
+  var camX = p.x, camZ = p.z, camD = 0, camTilt = 0, camBlend = 0;   // camera position: the puppet itself in first person
+  if (tpv) {
+    var eyeT = 55 + p.y - 12 * v.cr;               // steady anchor above the puppet: no head bob, no stun drop
+    var cam = chaseCam(p, v, eyeT);
+    camX = cam.x; camZ = cam.z; camD = cam.d;
+    camBlend = clamp((camD - CAM_NEAR) / (CAM_FADE - CAM_NEAR), 0, 1);   // 0 = first person (jammed against something), 1 = full chase view
+    eye = eyeT + CAM_UP * camD / CAM_DIST;         // the lift shrinks with the boom, so the view angle stays the same
+    camTilt = Math.min(0.6, (eye - eyeT + CAM_AIM) / camD) * focal * camBlend;   // look down at the puppet's chest so it stays at screen centre; eases to level when the camera is jammed in
+  } else v.camD = CAM_DIST;
+  var selfAlpha = camBlend;                        // your own puppet fades out as the camera closes in on it
+  var horizon = VH / 2 + (tpv ? 0 : flopAmt * 70) + Math.tan(v.pitch) * focal - camTilt;   // looking up moves the horizon down
   var depth = [];
   var AR = sim.R, fog = AR * 1.67;
   var viewOffset = (Net.mode == 'host' || Net.mode == 'client') ? 0 : pi * VW;
@@ -62,7 +119,7 @@ function renderView(pi) {
 
   // one ray per column: arena edge first, then pillars and boxes far to near
   var pillars = sim.pillars, boxes = sim.boxes || NOBOX, hits = [], hi, wallD = [], hq, bb;
-  var cx = p.x, cz = p.z;
+  var cx = camX, cz = camZ;                        // ray origin for every column
   if (rect && !facade) { cx = clamp(cx, -rect.hw + 2, rect.hw - 2); cz = clamp(cz, -rect.hd + 2, rect.hd - 2); }
   var NC = pit ? 0 : NCOL, holes = sim.holes || NOBOX;
   // colour of a top face: lighter than the sides, fogged by distance
@@ -242,15 +299,15 @@ function renderView(pi) {
   var ca = Math.cos(p.a), sa = Math.sin(p.a);
   var opps = [], oj, oo, ddx, ddz, nearest = null, offs = [];
   for (oj = 0; oj < n; oj++) {
-    if (oj == pi) continue;
+    if (oj == pi && !tpv) continue;                // third person: your own puppet is drawn too
     oo = DP[oj];
-    ddx = oo.x - p.x; ddz = oo.z - p.z;
-    opps.push({ j: oj, o: oo, dF: ddx * ca + ddz * sa, dR: -ddx * sa + ddz * ca, d: hyp(ddx, ddz) });
+    ddx = oo.x - camX; ddz = oo.z - camZ;
+    opps.push({ j: oj, o: oo, dF: ddx * ca + ddz * sa, dR: -ddx * sa + ddz * ca, d: hyp(oo.x - p.x, oo.z - p.z) });
   }
   opps.sort(function (m, n2) { return n2.dF - m.dF; });
   for (k = 0; k < (pit ? 0 : opps.length); k++) {
-    var op = opps[k], o = op.o, dF = op.dF, dR = op.dR, onScreen = false;
-    if (!nearest || op.d < nearest.d) nearest = op;
+    var op = opps[k], o = op.o, dF = op.dF, dR = op.dR, onScreen = false, me = op.j == pi;
+    if (!me && (!nearest || op.d < nearest.d)) nearest = op;
     if (dF > 6) {
       var s = focal / dF;
       var sxc = VW / 2 + dR * s;
@@ -269,6 +326,7 @@ function renderView(pi) {
         if (run >= 0 && (hid || Math.abs(lim - runLim) > 6)) {
           ctx.save();
           ctx.beginPath(); ctx.rect(run * COLW, 0, (ci - run) * COLW, Math.min(VH, runLim)); ctx.clip();
+          if (me) ctx.globalAlpha = selfAlpha;
           ctx.translate(sxc, groundY);
           ctx.scale(s, s);
           drawBody(op.j, o, vis[op.j], info);
@@ -278,13 +336,13 @@ function renderView(pi) {
         if (!hid && run < 0) { run = ci; runLim = lim; }
       }
     }
-    if (!onScreen) offs.push(op);
+    if (!onScreen && !me) offs.push(op);
   }
 
   // particles
   for (i = 0; i < parts.length; i++) {
     var q = parts[i];
-    var qx = q.x - p.x, qz = q.z - p.z;
+    var qx = q.x - camX, qz = q.z - camZ;
     var qF = qx * ca + qz * sa, qR = -qx * sa + qz * ca;
     if (qF < 5) continue;
     var qs = focal / qF;
@@ -298,7 +356,7 @@ function renderView(pi) {
   }
   ctx.globalAlpha = 1;
 
-  drawHands(pi, p, v, flopAmt);
+  if (!tpv) drawHands(pi, p, v, flopAmt);          // no first-person hands in third person
   ctx.restore();                                   // end of the (possibly tilted) world layer
   if (p.fell) {                                    // dropping: darker edges, then a white fade just before the respawn
     ctx.fillStyle = 'rgba(0,0,0,' + clamp((-p.y - 10) / 400, 0, 0.45) + ')'; ctx.fillRect(0, 0, VW, VH);
@@ -328,9 +386,8 @@ function renderView(pi) {
   if (sim.mode == 'play' || sim.mode == 'countdown') {
     text(p.isIt ? 'TAG THEM!' : 'RUN!', VW / 2, 70, 22, p.isIt ? '#ff5252' : '#2ecc71');
   }
-  // crosshair
-  ctx.fillStyle = 'rgba(255,255,255,0.5)';
-  ctx.fillRect(VW / 2 - 1, VH / 2 - 1, 3, 3);
+  // crosshair (not in third person: the screen centre is the puppet itself)
+  if (!tpv) { ctx.fillStyle = 'rgba(255,255,255,0.5)'; ctx.fillRect(VW / 2 - 1, VH / 2 - 1, 3, 3); }
   // dash bar
   var bw = 120, bx = VW / 2 - bw / 2;
   ctx.fillStyle = '#222'; ctx.fillRect(bx, VH - 22, bw, 7);
@@ -370,4 +427,3 @@ function renderView(pi) {
   }
   ctx.restore();
 }
-
