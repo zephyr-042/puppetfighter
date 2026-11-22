@@ -7,7 +7,7 @@
 var vis = [], parts = [], shake = 0, clock = 0, msg = { txt: '', col: '#fff', t: 99 };
 function mkVis() {
   return { lvx: 0, lvz: 0, phase: 0, moving: 0, kick: 0, flash: 0,
-           hf: 0, hfv: 0, hl: 0, hlv: 0, df: 0, dfv: 0, dl: 0, dlv: 0, cr: 0, pitch: 0, white: 0 };
+           hf: 0, hfv: 0, hl: 0, hlv: 0, df: 0, dfv: 0, dl: 0, dlv: 0, cr: 0, pitch: 0, white: 0, camD: CAM_DIST };
 }
 ensureVis(MAXP);
 
@@ -78,4 +78,3 @@ function updateParts(dt) {
     if (p.life <= 0) parts.splice(i, 1);
   }
 }
-
