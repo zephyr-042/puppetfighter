@@ -40,7 +40,7 @@ function support(s, p) {
 
 function stepP(s, i, bits, tdel, dt) {
   var p = s.p[i], fw = 0, st = 0, tn = 0, j, pl, l, f, k;
-  var wantSlide = false, wantGrab = false;
+  var wantSlide = false, wantGrab = false, ox = 0, oz = 0, want = 0, moved = false;
   if (p.stun > 0) p.stun -= dt;
   var can = s.mode == 'play' && p.stun <= 0;
   var ctl = can && !p.fell;        // once you are falling off the building there is no dash / jump / slide / grab / steering
@@ -63,7 +63,8 @@ function stepP(s, i, bits, tdel, dt) {
   if (tn) p.a += tn * 2.6 * dt;
   if (can && tdel) p.a += tdel;
   var ca = Math.cos(p.a), sa = Math.sin(p.a);
-  var speed = 150 * (p.isIt ? 1.12 : 1);
+  // momentum ramp: 150 -> 225 over 1.5 s of clean running (IT keeps its 1.12x on top)
+  var speed = (150 + 75 * clamp(p.runT / 1.5, 0, 1)) * (p.isIt ? 1.12 : 1);
   var grounded = p.y <= p.gy + 0.01 && p.vy <= 0;
 
   // release the pillar: fling along the facing direction (jump = fling upward)
@@ -155,7 +156,9 @@ function stepP(s, i, bits, tdel, dt) {
     var tot = hyp(p.vx, p.vz);
     if (tot > 620 && p.dashT <= 0) { p.vx *= 620 / tot; p.vz *= 620 / tot; }
     if (p.dashCd > 0) p.dashCd -= dt;
+    ox = p.x; oz = p.z; want = hyp(p.vx, p.vz) * dt;
     p.x += p.vx * dt; p.z += p.vz * dt;
+    moved = true;
   }
   if (p.grab >= 0 && p.dashCd > 0) p.dashCd -= dt;
 
@@ -213,6 +216,17 @@ function stepP(s, i, bits, tdel, dt) {
     }
   }
 
+  // momentum (runT): builds while you keep running near full speed on the ground; walls and slow-downs bleed it,
+  // stuns / falls / countdown zero it. Frozen (kept) during jumps, slides, dashes, pillar grabs and the coast after a fling
+  if (p.stun > 0 || p.fell || !can) p.runT = 0;
+  else if (p.grab >= 0 || !grounded || p.sl || p.dashT > 0 || p.coast > 0) { /* keep momentum */ }
+  else {
+    var hold = (fw !== 0 || st !== 0), blocked = moved && want > 0.5 && hyp(p.x - ox, p.z - oz) < want * 0.5;
+    if (blocked) p.runT = Math.max(0, p.runT - dt * 6);
+    else if (hold && hyp(p.vx, p.vz) > 0.7 * speed) p.runT = Math.min(1.5, p.runT + dt);
+    else p.runT = Math.max(0, p.runT - dt * (hold ? 3 : 5));
+  }
+
   // vertical: gravity, floor, pillar tops
   var gl = support(s, p), wasAir = !grounded, iv = p.vy;
   if (p.grab < 0) {
@@ -240,4 +254,3 @@ function stepP(s, i, bits, tdel, dt) {
     s.ev.push({ t: 'respawn', i: i, x: p.x, z: p.z });
   }
 }
-
