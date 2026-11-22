@@ -127,7 +127,7 @@ function stepP(s, i, bits, tdel, dt) {
 
     if (p.dashT > 0) {
       p.dashT -= dt;
-      p.vx = p.dashX * 460; p.vz = p.dashZ * 460;
+      p.vx = p.dashX * 540; p.vz = p.dashZ * 540;
       if (p.dashT <= 0) p.coast = 0.35;
     } else if (p.stun > 0) {
       f = Math.pow(0.02, dt);
