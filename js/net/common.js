@@ -44,7 +44,7 @@ var DP = [null, null];      // players as displayed this frame (predicted / inte
 
 // player fields on the wire. PF = what everybody else needs, FF = every field (your own player)
 var PF = ['x', 'z', 'y', 'vx', 'vz', 'gy', 'a', 'dashT', 'stun', 'stunMax', 'stunDir', 'isIt', 'sl', 'grab', 'score', 'itT', 'fell'];
-var FF = PF.concat(['vy', 'dashCd', 'dashX', 'dashZ', 'gAng', 'gR', 'gL', 'gcd', 'coast', 'jbuf']);
+var FF = PF.concat(['vy', 'dashCd', 'dashX', 'dashZ', 'gAng', 'gR', 'gL', 'gcd', 'coast', 'jbuf', 'runT']);
 var BOOLF = { isIt: 1, sl: 1, fell: 1 };
 function r2(v) { return Math.round(v * 100) / 100; }
 function ts() { return new Date().getTime(); }
@@ -106,4 +106,3 @@ function flushIce(o) {
   var c;
   while ((c = o.ice.shift())) addIce(o, c);
 }
-
