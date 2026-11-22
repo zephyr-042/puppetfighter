@@ -10,10 +10,10 @@ function srand(s) {
 function mkP() {
   return { x: 0, z: 0, y: 0, vx: 0, vz: 0, vy: 0, gy: 0, a: 0, dashT: 0, dashCd: 0, dashX: 1, dashZ: 0,
            stun: 0, stunMax: 1, stunDir: 1, isIt: false, score: 0, itT: 0,
-           sl: false, grab: -1, gAng: 0, gR: 0, gL: 0, gcd: 0, coast: 0, jbuf: 0, fell: false, fnow: false };
+           sl: false, grab: -1, gAng: 0, gR: 0, gL: 0, gcd: 0, coast: 0, jbuf: 0, fell: false, fnow: false, runT: 0 };
 }
 function simNew() {
-  return { mode: 'title', mt: 0, cfg: { time: 30, wins: 3, pillars: true, solo: false, mouse: true, n: 2, map: 0, online: false, tpv: true },   // tpv = third-person camera: local view setting, never sent over the network
+  return { mode: 'title', mt: 0, cfg: { time: 30, wins: 3, pillars: true, solo: false, mouse: true, n: 2, map: 0, online: false },
            round: 1, timeLeft: 30, tagCd: 0, lastCount: 4, lastSec: 99, seed: 12345,
            winner: -1, R: 270, rect: null, spawns: null, holes: [], p: [mkP(), mkP()], pillars: [], boxes: [], ev: [] };
 }
@@ -31,7 +31,7 @@ function simRestore(s, str) {
   for (k in o) s[k] = o[k];
   s.ev = [];
 }
-function setStun(p, d, dir) { p.stun = d; p.stunMax = d; p.stunDir = dir; }
+function setStun(p, d, dir) { p.runT = 0; p.stun = d; p.stunMax = d; p.stunDir = dir; }
 
 function simPillars(s) {
   var d = MAPDEFS[s.cfg.map] || MAPDEFS[0];
@@ -56,7 +56,7 @@ function simResetPlayers(s) {
     sp = spawnPos(s, i, n);
     p.x = sp.x; p.z = sp.z; p.y = 0; p.gy = 0; p.a = sp.a;
     p.vx = p.vz = p.vy = 0; p.dashT = 0; p.dashCd = 0; p.stun = 0; p.isIt = false; p.itT = 0;
-    p.sl = false; p.grab = -1; p.gcd = 0; p.coast = 0; p.jbuf = 0; p.fell = false; p.fnow = false;
+    p.sl = false; p.grab = -1; p.gcd = 0; p.coast = 0; p.jbuf = 0; p.fell = false; p.fnow = false; p.runT = 0;
   }
 }
 function simStartRound(s) {
