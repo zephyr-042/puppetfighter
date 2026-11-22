@@ -23,6 +23,23 @@ function beep(f, d, type, vol) {
 }
 function setMsg(t, c) { msg.txt = t; msg.col = c; msg.t = 0; }
 
+// pitch slide (descending whistle for a fall, rising thump for a landing)
+function glide(f0, f1, d, type, vol) {
+  try {
+    if (!ac) {
+      var C = window.AudioContext || window.webkitAudioContext;
+      if (!C) return;
+      ac = new C();
+    }
+    var o = ac.createOscillator(), g = ac.createGain(), t0 = ac.currentTime;
+    o.type = type || 'sine';
+    o.frequency.setValueAtTime(f0, t0); o.frequency.exponentialRampToValueAtTime(f1, t0 + d);
+    g.gain.setValueAtTime(vol || 0.05, t0); g.gain.exponentialRampToValueAtTime(0.0001, t0 + d);
+    o.connect(g); g.connect(ac.destination);
+    o.start(); o.stop(t0 + d);
+  } catch (e) {}
+}
+
 function handleEvents() {
   var i, e;
   for (i = 0; i < sim.ev.length; i++) {
@@ -54,7 +71,16 @@ function handleEvents() {
     } else if (e.t == 'fling') {
       burst3(e.x, e.z, e.y, 10, 'rgb(120,220,255)', 160, 0.4, 3); beep(700, 0.12, 'sawtooth', 0.05);
     } else if (e.t == 'fall') {
-      shake = 6; setMsg('FELL OFF!', '#f1c40f'); beep(150, 0.4, 'sawtooth', 0.06);
+      // only the player who falls gets the message + whistle; everybody else just sees them plummet
+      if (Net.mode == 'local' || e.i === (Net.mode == 'client' ? Net.me : 0)) {
+        shake = 6; setMsg('FELL OFF!', '#ff5252'); glide(1100, 160, 0.9, 'sine', 0.06);
+      }
+    } else if (e.t == 'respawn') {
+      burst3(e.x, e.z, 60, 10, 'rgb(220,220,230)', 90, 0.5, 3);
+      if (Net.mode == 'local' || e.i === (Net.mode == 'client' ? Net.me : 0)) {
+        if (vis[e.i]) { vis[e.i].white = 1; vis[e.i].pitch = 0; }
+        glide(220, 520, 0.25, 'triangle', 0.05);
+      }
     } else if (e.t == 'count') { beep(440, 0.12, 'square', 0.05); }
     else if (e.t == 'go') { beep(880, 0.3, 'square', 0.06); }
     else if (e.t == 'tick') { beep(660, 0.08, 'square', 0.04); }
