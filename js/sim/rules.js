@@ -64,9 +64,9 @@ function simStep(s, inp, dt) {
   s.mt += dt;
   var i, solo = s.cfg.solo, q;
   for (i = 0; i < s.p.length; i++) { q = inp[i] || NOIN; stepP(s, i, q.b, q.t, dt); }
-  for (i = 0; i < s.p.length; i++) {              // whoever fell off the roof becomes IT
-    if (!s.p[i].fell) continue;
-    s.p[i].fell = false;
+  for (i = 0; i < s.p.length; i++) {              // whoever starts falling off the roof becomes IT
+    if (!s.p[i].fnow) continue;
+    s.p[i].fnow = false;
     if (s.mode == 'play' && !s.p[i].isIt) {
       for (q = 0; q < s.p.length; q++) s.p[q].isIt = false;
       s.p[i].isIt = true; s.tagCd = 1.0;
