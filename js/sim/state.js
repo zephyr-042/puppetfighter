@@ -13,7 +13,7 @@ function mkP() {
            sl: false, grab: -1, gAng: 0, gR: 0, gL: 0, gcd: 0, coast: 0, jbuf: 0, fell: false, fnow: false };
 }
 function simNew() {
-  return { mode: 'title', mt: 0, cfg: { time: 30, wins: 3, pillars: true, solo: false, mouse: true, n: 2, map: 0, online: false },
+  return { mode: 'title', mt: 0, cfg: { time: 30, wins: 3, pillars: true, solo: false, mouse: true, n: 2, map: 0, online: false, tpv: true },   // tpv = third-person camera: local view setting, never sent over the network
            round: 1, timeLeft: 30, tagCd: 0, lastCount: 4, lastSec: 99, seed: 12345,
            winner: -1, R: 270, rect: null, spawns: null, holes: [], p: [mkP(), mkP()], pillars: [], boxes: [], ev: [] };
 }
@@ -80,4 +80,3 @@ function simToTitle(s) {
   simSetN(s, s.cfg.solo || s.cfg.online ? s.cfg.n : 2);
   simPillars(s); simResetPlayers(s);
 }
-
