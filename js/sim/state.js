@@ -10,12 +10,12 @@ function srand(s) {
 function mkP() {
   return { x: 0, z: 0, y: 0, vx: 0, vz: 0, vy: 0, gy: 0, a: 0, dashT: 0, dashCd: 0, dashX: 1, dashZ: 0,
            stun: 0, stunMax: 1, stunDir: 1, isIt: false, score: 0, itT: 0,
-           sl: false, grab: -1, gAng: 0, gR: 0, gL: 0, gcd: 0, coast: 0, jbuf: 0, fell: false };
+           sl: false, grab: -1, gAng: 0, gR: 0, gL: 0, gcd: 0, coast: 0, jbuf: 0, fell: false, fnow: false };
 }
 function simNew() {
   return { mode: 'title', mt: 0, cfg: { time: 30, wins: 3, pillars: true, solo: false, mouse: true, n: 2, map: 0, online: false },
            round: 1, timeLeft: 30, tagCd: 0, lastCount: 4, lastSec: 99, seed: 12345,
-           winner: -1, R: 270, rect: null, p: [mkP(), mkP()], pillars: [], boxes: [], ev: [] };
+           winner: -1, R: 270, rect: null, spawns: null, holes: [], p: [mkP(), mkP()], pillars: [], boxes: [], ev: [] };
 }
 function simSetN(s, n) {
   while (s.p.length < n) s.p.push(mkP());
@@ -35,14 +35,17 @@ function setStun(p, d, dir) { p.stun = d; p.stunMax = d; p.stunDir = dir; }
 
 function simPillars(s) {
   var d = MAPDEFS[s.cfg.map] || MAPDEFS[0];
-  s.R = d.R; s.rect = d.rect || null;
+  s.R = d.R; s.rect = d.rect || null; s.spawns = d.spawns || null;
   s.pillars = s.cfg.pillars ? mapPillars(s.cfg.map) : [];
   s.boxes = s.cfg.pillars ? mapBoxes(s.cfg.map) : [];
+  s.holes = s.cfg.pillars ? mapHoles(s.cfg.map) : [];
 }
-// spawn ring (circle maps) or ellipse (roof), everyone facing the centre. Also used to respawn after a fall
+// spawn points: a fixed list if the map has one, else a ring (circle maps) or ellipse. Everyone faces
+// the centre. Also used to respawn after a fall
 function spawnPos(s, i, n) {
-  var th = PI + i * 2 * PI / n, x, z;
-  if (s.rect) { x = Math.cos(th) * s.rect.hw * 0.72; z = Math.sin(th) * s.rect.hd * 0.6; }
+  var th = PI + i * 2 * PI / n, x, z, q;
+  if (s.spawns) { q = s.spawns[i % s.spawns.length]; x = q.x; z = q.z; }
+  else if (s.rect) { x = Math.cos(th) * s.rect.hw * 0.72; z = Math.sin(th) * s.rect.hd * 0.6; }
   else { x = Math.cos(th) * s.R * 0.63; z = Math.sin(th) * s.R * 0.63; }
   return { x: x, z: z, a: Math.atan2(-z, -x) };
 }
@@ -53,7 +56,7 @@ function simResetPlayers(s) {
     sp = spawnPos(s, i, n);
     p.x = sp.x; p.z = sp.z; p.y = 0; p.gy = 0; p.a = sp.a;
     p.vx = p.vz = p.vy = 0; p.dashT = 0; p.dashCd = 0; p.stun = 0; p.isIt = false; p.itT = 0;
-    p.sl = false; p.grab = -1; p.gcd = 0; p.coast = 0; p.jbuf = 0; p.fell = false;
+    p.sl = false; p.grab = -1; p.gcd = 0; p.coast = 0; p.jbuf = 0; p.fell = false; p.fnow = false;
   }
 }
 function simStartRound(s) {
