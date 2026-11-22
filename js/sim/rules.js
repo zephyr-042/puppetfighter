@@ -30,11 +30,11 @@ function collide(s) {
   for (i = 0; i < n; i++) {
     for (j = i + 1; j < n; j++) {
       a = s.p[i]; b = s.p[j];
-      if (Math.abs(a.y - b.y) > 40) continue;   // clearly above/below each other: no contact, no tag
+      if (!(a.y < b.y + 72 && b.y < a.y + 72)) continue;   // bodies are 72 tall: no contact unless they overlap vertically
       dx = b.x - a.x; dz = b.z - a.z; d = hyp(dx, dz);
-      if (d < 28 && d > 0.001) {
-        nx = dx / d; nz = dz / d; ov = (28 - d) / 2;
-        a.x -= nx * ov; a.z -= nz * ov; b.x += nx * ov; b.z += nz * ov;
+      if (d < 34 && d > 0.001) {                          // 34 = generous tag reach, bodies only push apart inside 28
+        nx = dx / d; nz = dz / d;
+        if (d < 28) { ov = (28 - d) / 2; a.x -= nx * ov; a.z -= nz * ov; b.x += nx * ov; b.z += nz * ov; }
         if (s.tagCd <= 0 && (a.isIt || b.isIt)) {
           ii = a.isIt ? i : j; oi = a.isIt ? j : i;
           if (s.p[oi].dashT > 0 && s.p[oi].stun <= 0) doShove(s, oi, ii);
@@ -93,4 +93,3 @@ function simStep(s, inp, dt) {
     }
   }
 }
-
