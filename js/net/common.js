@@ -43,9 +43,9 @@ var ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1
 var DP = [null, null];      // players as displayed this frame (predicted / interpolated on a guest)
 
 // player fields on the wire. PF = what everybody else needs, FF = every field (your own player)
-var PF = ['x', 'z', 'y', 'vx', 'vz', 'gy', 'a', 'dashT', 'stun', 'stunMax', 'stunDir', 'isIt', 'sl', 'grab', 'score', 'itT'];
+var PF = ['x', 'z', 'y', 'vx', 'vz', 'gy', 'a', 'dashT', 'stun', 'stunMax', 'stunDir', 'isIt', 'sl', 'grab', 'score', 'itT', 'fell'];
 var FF = PF.concat(['vy', 'dashCd', 'dashX', 'dashZ', 'gAng', 'gR', 'gL', 'gcd', 'coast', 'jbuf']);
-var BOOLF = { isIt: 1, sl: 1 };
+var BOOLF = { isIt: 1, sl: 1, fell: 1 };
 function r2(v) { return Math.round(v * 100) / 100; }
 function ts() { return new Date().getTime(); }
 function packP(p, F) {
@@ -80,7 +80,7 @@ var Net = {
     return a;
   }
 };
-var OWN_EV = { dash: 1, jump: 1, land: 1, slide: 1, grab: 1, fling: 1, fall: 1 };
+var OWN_EV = { dash: 1, jump: 1, land: 1, slide: 1, grab: 1, fling: 1, fall: 1, respawn: 1 };
 
 // true when it is safe to broadcast on the Supabase channel (otherwise supabase-js falls back to one
 // HTTP POST per message, which floods the network during a reconnect, so we skip sends then)
