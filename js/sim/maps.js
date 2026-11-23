@@ -52,10 +52,15 @@ function mapPillars(k) {
     // NE scaffolding
     out.push({ x: 700, z: -1100, r: 26, h: 195, c: [200, 120, 60] });                 // north of the scaffolds: fling-jump up onto tier 1 / 2
     out.push({ x: 1200, z: -1060, r: 26, h: 185, c: [200, 120, 60] });                // beside the pit: fling across it
-    // SW swing yard: three pillars about 300 apart, one fling each
-    out.push({ x: -1600, z: 540, r: 26, h: 185, c: [205, 205, 210] });                // swing 1
-    out.push({ x: -1330, z: 690, r: 26, h: 195, c: [205, 205, 210] });                // swing 2
-    out.push({ x: -1060, z: 540, r: 26, h: 185, c: [205, 205, 210] });                // swing 3 (chain them across the yard)
+    // SW swing yard: spider-web cluster of 7 pillars for chaining aerial swings
+    out.push({ x: -1600, z: 540, r: 26, h: 185, c: [205, 205, 210] });
+    out.push({ x: -1330, z: 690, r: 26, h: 195, c: [205, 205, 210] });
+    out.push({ x: -1060, z: 540, r: 26, h: 185, c: [205, 205, 210] });
+    out.push({ x: -1150, z: 860, r: 26, h: 195, c: [200, 120, 60] });
+    out.push({ x: -1780, z: 820, r: 26, h: 190, c: [200, 120, 60] });
+    out.push({ x: -1180, z: 270, r: 26, h: 190, c: [200, 120, 60] });
+    out.push({ x: -820, z: 380, r: 26, h: 185, c: [205, 205, 210] });
+
     // SE docks
     out.push({ x: 1650, z: 900, r: 26, h: 200, c: [200, 120, 60] });                  // crane mast
     // hub
@@ -152,25 +157,26 @@ function mapBoxes(k) {
     // ---- SOUTH-WEST, The Swing Yard: open courtyard, one flank tower, low cover
     b(-760, 760, 90, 90, 175, DK);          // flank tower: sling round it
     b(-1810, 314, 90, 14, 26, P);           // low cover wall
-    // ---- SOUTH-EAST, The Crate Docks: containers (h64 / h32), crate steps, low walls (h26)
-    b(560, 380, 140, 50, 64, RED);          // container (red)
-    b(740, 370, 40, 40, 32, W);             // crate step up to it
-    b(700, 610, 140, 50, 64, BLU);          // container (blue)
-    b(880, 620, 40, 40, 32, W);             // crate step
-    b(1130, 448, 130, 48, 32, GRN);         // low container (green)
-    b(1300, 460, 40, 40, 32, W);            // crate
-    b(1380, 460, 40, 40, 64, W);            // crate stack top (64)
-    b(1130, 748, 130, 48, 64, ORG);         // container (orange)
-    b(1300, 750, 40, 40, 32, W);            // crate step
-    b(520, 860, 100, 14, 26, P);            // low wall
-    b(1474, 660, 14, 100, 26, P);           // low wall
-    // ---- CENTRAL HUB: stepped core 36 -> 72, crate, low wall
-    b(0, 0, 120, 80, 72, CORE);             // core (72)
-    b(-170, 0, 50, 60, 36, STEP);           // step W (36)
-    b(10, -115, 70, 35, 36, STEP);          // step N (36)
-    b(175, 20, 55, 50, 36, STEP);           // step E (36)
-    b(230, 200, 40, 40, 36, W);             // crate (36)
-    b(-260, 144, 80, 14, 26, P);            // low wall (26)
+    // ---- SOUTH-EAST, The Crate Docks: tall containers (95), climb steps (48), sightline walls (95)
+    b(560, 380, 140, 50, 95, RED);          // container (red)
+    b(740, 370, 40, 40, 48, W);             // crate step up to it
+    b(700, 610, 140, 50, 95, BLU);          // container (blue)
+    b(880, 620, 40, 40, 48, W);             // crate step
+    b(1130, 448, 130, 48, 48, GRN);         // mid container (green)
+    b(1300, 460, 40, 40, 48, W);            // crate step
+    b(1380, 460, 40, 40, 95, W);            // crate stack top (95)
+    b(1130, 748, 130, 48, 95, ORG);         // container (orange)
+    b(1300, 750, 40, 40, 48, W);            // crate step
+    b(520, 860, 100, 14, 95, P);            // tall wall
+    b(1474, 660, 14, 100, 95, P);           // tall wall
+    // ---- CENTRAL HUB: raised stepped core 50 -> 100, crate, wall
+    b(0, 0, 120, 80, 100, CORE);            // core (100)
+    b(-170, 0, 50, 60, 50, STEP);           // step W (50)
+    b(10, -115, 70, 35, 50, STEP);          // step N (50)
+    b(175, 20, 55, 50, 50, STEP);           // step E (50)
+    b(230, 200, 40, 40, 50, W);             // crate (50)
+    b(-260, 144, 80, 14, 95, P);            // tall wall (95)
+
   }
   return out;
 }
