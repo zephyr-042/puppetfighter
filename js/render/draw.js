@@ -36,10 +36,14 @@ function poly(pts, color) {
 }
 function dim(a) { ctx.fillStyle = 'rgba(0,0,0,' + a + ')'; ctx.fillRect(0, 0, W, H); }
 
-// puppet seen from the front/back, local units, feet at (0,0), y up is negative
+// puppet seen from the front/back, local units, feet at (0,0), y up is negative.
+// Crouch / slide pose (v.cr follows p.sl, which is on the wire, so every player shows it): shoulders and head sink
+// 22, knees bend with the feet kicked forward and out, arms out for balance, body leans back.
 function drawBody(idx, p, v, info) {
   var c = COLS[idx], i, s;
-  var spd = hyp(p.vx, p.vz), moving = Math.min(1, spd / 150);
+  var spd = hyp(p.vx, p.vz);
+  var cr = p.stun > 0 ? 0 : v.cr;
+  var moving = Math.min(1, spd / 150) * (1 - 0.85 * cr);
   var bob = Math.abs(Math.sin(v.phase)) * 2.5 * moving * (info.air > 0.5 ? 0 : 1);
   var flop = 0;
   if (p.stun > 0 && p.stunMax > 0) flop = Math.sin(PI * (1 - p.stun / p.stunMax)) * 1.45 * p.stunDir;
@@ -47,48 +51,57 @@ function drawBody(idx, p, v, info) {
   var hx = clamp(v.hl * info.cLat + v.hf * info.cFwd, -18, 18);
   var hy = clamp(v.hf * 0.25, -6, 6);
   var hdx = clamp(v.dl * info.cLat + v.df * info.cFwd, -8, 8);
+  var drop = 22 * cr;
+  var hipY = -26 + drop * 0.45;
 
   // shadow (stays on the surface under the puppet)
   ctx.fillStyle = 'rgba(0,0,0,0.35)';
-  ell(0, info.air, 16, 16 * info.k); ctx.fill();
+  ell(0, info.air, 16 + 7 * cr, (16 + 7 * cr) * info.k); ctx.fill();
 
   ctx.save();
   ctx.rotate(flop);
   ctx.lineCap = 'round';
+  if (cr > 0.001) {                                  // lean back while sliding (forward axis shows on screen through cFwd)
+    var pvy = -30 + drop * 0.3;
+    ctx.translate(0, pvy); ctx.rotate(-0.28 * cr * info.cFwd); ctx.translate(0, -pvy);
+  }
 
   ctx.lineWidth = 5;
   for (i = 0; i < 2; i++) {
     s = i == 0 ? -1 : 1;
     var ph = v.phase + (i == 0 ? 0 : PI);
-    var fx = s * 6 + Math.sin(ph) * moving * 6 + (p.stun > 0 ? flail * s : 0);
+    var fx = s * 6 + Math.sin(ph) * moving * 6 + (p.stun > 0 ? flail * s : 0) + cr * (s * 7 + info.cFwd * 12);
     var lift = Math.max(0, Math.cos(ph)) * 5 * moving;
+    var fy = -lift - 2 - cr * 3;
+    var kx = (s * 5 + fx) / 2 + cr * (s * 4 + info.cFwd * 9), ky = (hipY - bob + fy) / 2 - cr * 5;
     ctx.strokeStyle = sh(c, -0.35);
-    ctx.beginPath(); ctx.moveTo(s * 5, -26 - bob); ctx.lineTo(fx, -lift - 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(s * 5, hipY - bob); ctx.lineTo(kx, ky); ctx.lineTo(fx, fy); ctx.stroke();
     ctx.fillStyle = sh(c, -0.5);
-    ctx.fillRect(fx - 4, -lift - 4, 8, 4);
+    ctx.fillRect(fx - 4, fy - 2, 8, 4);
   }
 
   ctx.fillStyle = sh(c, 0);
-  ctx.fillRect(-8, -50 - bob, 16, 24);
+  ctx.fillRect(-8, -50 - bob + drop, 16, 24 - drop * 0.45);
   ctx.fillStyle = sh(c, 0.25);
-  ctx.fillRect(-8, -50 - bob, 16, 5);
+  ctx.fillRect(-8, -50 - bob + drop, 16, 5);
 
   ctx.lineWidth = 4;
   for (i = 0; i < 2; i++) {
     s = i == 0 ? -1 : 1;
-    var rx = s * 6, ry = 20;
-    if (p.dashT > 0) { rx = s * 10; ry = 4; }
-    if (p.grab >= 0) { rx = s * 4; ry = -14; }
-    if (p.stun > 0) { rx = s * (14 + flail * 0.4); ry = -6 + Math.cos(clock * 20 + i) * 8; }
-    var shx = s * 10, shy = -48 - bob;
-    var ex = shx + rx + hx, ey = shy + ry + hy;
+    var rx = s * 6, ay = 20;
+    if (cr > 0.05) { rx = s * (6 + 9 * cr); ay = 20 - cr * 14; }
+    if (p.dashT > 0) { rx = s * 10; ay = 4; }
+    if (p.grab >= 0) { rx = s * 4; ay = -14; }
+    if (p.stun > 0) { rx = s * (14 + flail * 0.4); ay = -6 + Math.cos(clock * 20 + i) * 8; }
+    var shx = s * 10, shy = -48 - bob + drop;
+    var ex = shx + rx + hx, ey = shy + ay + hy;
     ctx.strokeStyle = sh(c, -0.2);
     ctx.beginPath(); ctx.moveTo(shx, shy); ctx.lineTo(ex, ey); ctx.stroke();
     ctx.fillStyle = sh(c, 0.35);
     ctx.fillRect(ex - 3, ey - 3, 6, 6);
   }
 
-  var cx = hdx, cy = -63 - bob, hs = 11;
+  var cx = hdx, cy = -63 - bob + drop, hs = 11;
   ctx.fillStyle = sh(c, 0.15);
   ctx.fillRect(cx - hs, cy - hs, hs * 2, hs * 2);
   poly([cx - hs, cy - hs, cx + hs, cy - hs, cx + hs + 6, cy - hs - 6, cx - hs + 6, cy - hs - 6], sh(c, 0.5));
@@ -110,7 +123,7 @@ function drawBody(idx, p, v, info) {
   ctx.restore();
 
   if (p.isIt) {
-    var my = -100 + Math.sin(clock * 8) * 4;
+    var my = -100 + drop * 0.6 + Math.sin(clock * 8) * 4;
     poly([-9, my - 10, 9, my - 10, 0, my + 2], '#ff4444');
     text('IT', 0, my - 14, 14, '#ff6666');
   }
@@ -135,4 +148,3 @@ function drawHands(pi, p, v, horizonShift) {
     ctx.fillRect(hx - 18, hy - 18, 36, 36);
   }
 }
-
