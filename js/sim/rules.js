@@ -25,6 +25,16 @@ function doShove(s, ri, ii) {
   setStun(it, 0.5, nx > 0 ? 1 : -1);
   s.ev.push({ t: 'shove', a: ri, b: ii, x: (it.x + runner.x) / 2, z: (it.z + runner.z) / 2 });
 }
+// runner vs runner sabotage: a runner sliding fast (> 320) trips the other runner
+function tripper(p) { return p.sl && hyp(p.vx, p.vz) > 320; }
+function doTrip(s, ai, vi) {
+  var a = s.p[ai], v = s.p[vi];
+  var dx = v.x - a.x, dz = v.z - a.z, d = hyp(dx, dz) || 1;
+  var nx = dx / d, nz = dz / d;
+  setStun(v, 0.55, nx > 0 ? 1 : -1);
+  v.vx += nx * 340; v.vz += nz * 340; v.dashT = 0; v.runT = 0;
+  s.ev.push({ t: 'shove', a: ai, b: vi, x: (a.x + v.x) / 2, z: (a.z + v.z) / 2 });
+}
 function collide(s) {
   var n = s.p.length, i, j, a, b, dx, dz, d, nx, nz, ov, ii, oi;
   for (i = 0; i < n; i++) {
@@ -35,7 +45,10 @@ function collide(s) {
       if (d < 34 && d > 0.001) {                          // 34 = generous tag reach, bodies only push apart inside 28
         nx = dx / d; nz = dz / d;
         if (d < 28) { ov = (28 - d) / 2; a.x -= nx * ov; a.z -= nz * ov; b.x += nx * ov; b.z += nz * ov; }
-        if (s.tagCd <= 0 && (a.isIt || b.isIt)) {
+        if (!a.isIt && !b.isIt) {                         // two runners: only exactly one fast slider trips the other
+          if (tripper(a) && !tripper(b) && b.stun <= 0) doTrip(s, i, j);
+          else if (tripper(b) && !tripper(a) && a.stun <= 0) doTrip(s, j, i);
+        } else if (s.tagCd <= 0) {
           ii = a.isIt ? i : j; oi = a.isIt ? j : i;
           if (s.p[oi].dashT > 0 && s.p[oi].stun <= 0) doShove(s, oi, ii);
           else if (s.p[ii].stun <= 0) doTag(s, ii, oi);
