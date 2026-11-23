@@ -9,6 +9,7 @@
     slide  hold: near-zero friction glide, tiny steering, speed boost on entry
     grab   hold near a pillar: orbit it, W/S changes radius (speed), release to fling
            in your facing direction (jump while grabbed = fling upward)
+  Pillars: grabbing keeps your whole entry speed as orbit speed (see "grab a pillar").
    ============================================================================ */
 function tryDash(s, i, fw, st) {
   var p = s.p[i];
@@ -70,7 +71,7 @@ function stepP(s, i, bits, tdel, dt) {
   // release the pillar: fling along the facing direction (jump = fling upward)
   if (p.grab >= 0 && (!wantGrab || p.stun > 0 || p.jbuf > 0)) {
     if (can) {
-      var sp2 = clamp(hyp(p.vx, p.vz) + 140, 200, 650);
+      var sp2 = clamp(hyp(p.vx, p.vz) + 160, 260, 720);
       p.vx = ca * sp2; p.vz = sa * sp2;
       if (p.jbuf > 0) { p.vy = 300; p.jbuf = 0; }
       s.ev.push({ t: 'fling', i: i, x: p.x, z: p.z, y: p.y + 30 });
@@ -85,13 +86,15 @@ function stepP(s, i, bits, tdel, dt) {
       pl = s.pillars[j];
       if (p.y > pl.h + 20) continue;
       dd = hyp(p.x - pl.x, p.z - pl.z);
-      if (dd < pl.r + 46 && dd < bd) { bd = dd; bj = j; }
+      if (dd < pl.r + 58 && dd < bd) { bd = dd; bj = j; }
     }
     if (bj >= 0) {
       pl = s.pillars[bj];
       var rx = p.x - pl.x, rz = p.z - pl.z, r0 = Math.max(bd, pl.r + 16);
-      var vt = (-rz * p.vx + rx * p.vz) / (bd || 1);
-      if (Math.abs(vt) < 60) vt = (vt < 0 ? -60 : 60);
+      // forgiving entry: ALL of your speed becomes orbit speed (floor 220), even when charging dead-on at the pillar.
+      // The spin direction follows which side of the pillar you are on (dead-centre: +1)
+      var cr = -rz * p.vx + rx * p.vz, entrySpd = hyp(p.vx, p.vz);
+      var vt = (cr < -0.001 ? -1 : 1) * Math.max(Math.abs(cr) / (bd || 1), entrySpd, 220);
       p.grab = bj; p.gAng = Math.atan2(rz, rx); p.gR = r0; p.gL = vt * r0;
       p.dashT = 0; p.vy = 0;
       s.ev.push({ t: 'grab', i: i, x: p.x, z: p.z });
@@ -154,7 +157,8 @@ function stepP(s, i, bits, tdel, dt) {
     }
     if (p.coast > 0) p.coast -= dt;
     var tot = hyp(p.vx, p.vz);
-    if (tot > 620 && p.dashT <= 0) { p.vx *= 620 / tot; p.vz *= 620 / tot; }
+    var vcap = p.coast > 0 ? 720 : 620;      // flings (up to 720) must not be clipped on the first tick
+    if (tot > vcap && p.dashT <= 0) { p.vx *= vcap / tot; p.vz *= vcap / tot; }
     if (p.dashCd > 0) p.dashCd -= dt;
     ox = p.x; oz = p.z; want = hyp(p.vx, p.vz) * dt;
     p.x += p.vx * dt; p.z += p.vz * dt;
@@ -189,6 +193,7 @@ function stepP(s, i, bits, tdel, dt) {
     pl = s.pillars[j];
     if (j == p.grab || p.y > pl.h - 5) continue;
     pdx = p.x - pl.x; pdz = p.z - pl.z; pdd = hyp(pdx, pdz); pmn = pl.r + 14;
+    if (wantGrab && p.gcd <= 0 && p.dashT <= 0 && pdd < pl.r + 58) continue;   // about to grab it: do not stop dead against it
     if (pdd < pmn && pdd > 0.001) {
       var qx = pdx / pdd, qz = pdz / pdd, dv = p.vx * qx + p.vz * qz;
       p.x = pl.x + qx * pmn; p.z = pl.z + qz * pmn;
