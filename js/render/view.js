@@ -262,8 +262,11 @@ function renderView(pi) {
   }
 
   // screen y of the top of the nearest obstacle in front of distance dF in column ci (1e9 = none, -1e9 = fully blocked).
-  // From above, a puppet behind a low obstacle is also hidden by that obstacle's top face (up to its far edge)
-  function colLim(ci, dF) {
+  // From above, a puppet behind a low obstacle is also hidden by that obstacle's top face (up to its far edge).
+  // fy = height of the puppet's feet: a puppet standing on a box (fy >= box top - 2) is never clipped by that box.
+  // Camera standing ABOVE a box's footprint (on a roof): the roof slab ends at the ray's exit edge, so a puppet on the
+  // ground farther than that edge only shows above the exit edge's screen y (it must not draw through the roof)
+  function colLim(ci, dF, fy) {
     var cs = ci * COLW + COLW / 2 - VW / 2, aa = Math.atan(cs / focal), an = p.a + aa;
     var ux = Math.cos(an), uz = Math.sin(an), cq = Math.cos(aa), lim = 1e9, kk, o2, ex2, ez2, b2, d3, sq, t3, tp3, tf3, y3, ix, iz, x1, x2, z1, z2, tn, tf, hh;
     if (wallD[ci] < dF) return -1e9;
@@ -283,12 +286,16 @@ function renderView(pi) {
     }
     for (kk = 0; kk < boxes.length; kk++) {
       o2 = boxes[kk];
+      if (eye > o2.h && fy >= o2.h - 2) continue;              // standing on top of this box: it cannot hide you
       ix = Math.abs(ux) < 1e-6 ? 1e-6 : ux; iz = Math.abs(uz) < 1e-6 ? 1e-6 : uz;
       x1 = (o2.x - o2.hw - cx) / ix; x2 = (o2.x + o2.hw - cx) / ix; z1 = (o2.z - o2.hd - cz) / iz; z2 = (o2.z + o2.hd - cz) / iz;
       tn = Math.max(Math.min(x1, x2), Math.min(z1, z2)); tf = Math.min(Math.max(x1, x2), Math.max(z1, z2));
       tp3 = tn * cq; tf3 = tf * cq;
       if (tn < tf && tn > 0 && tp3 < dF) {
         y3 = (eye > o2.h && dF > tf3) ? horizon + (eye - o2.h) * focal / Math.max(1, tf3) : horizon - (o2.h - eye) * focal / tp3;
+        if (y3 < lim) lim = y3;
+      } else if (rect && !facade && tn <= 0 && tf > 0 && eye > o2.h && dF > tf3) {   // camera above the box: roof slab occludes the ground beyond its exit edge
+        y3 = horizon + (eye - o2.h) * focal / Math.max(1, tf3);
         if (y3 < lim) lim = y3;
       }
     }
@@ -321,7 +328,7 @@ function renderView(pi) {
                    shift: Math.sin(da) * 4, k: clamp(eye / dF * 1.2, 0.08, 0.6), air: o.y - o.gy };
       var headY = groundY - 105 * s, run = -1, runLim = 0, lim, hid, ci;
       for (ci = c0; ci <= c1 + 1; ci++) {
-        lim = ci <= c1 ? colLim(ci, dF) : -1e9;
+        lim = ci <= c1 ? colLim(ci, dF, o.y) : -1e9;
         hid = lim <= headY;
         if (run >= 0 && (hid || Math.abs(lim - runLim) > 6)) {
           ctx.save();
