@@ -414,7 +414,7 @@ function renderView(pi) {
     else { ax = 20; poly([ax + 14, ay - 12, ax - 8, ay, ax + 14, ay + 12], sh(COLS[ro.j], 0.2)); }
   }
   // events / state text
-  if (msg.t < 0.9) {
+  if (msg.t < 0.9 && sim.mode != 'roundend' && sim.mode != 'matchend') {   // (the results card owns the screen at the end)
     ctx.globalAlpha = clamp(1 - msg.t / 0.9, 0, 1);
     text(msg.txt, VW / 2, 130, 44, msg.col);
     ctx.globalAlpha = 1;
@@ -424,13 +424,16 @@ function renderView(pi) {
     text(cn, VW / 2, VH / 2 - 20, 80, '#fff');
   } else if (sim.mode == 'play' && sim.mt < 0.7 && !sim.cfg.solo) {
     text('GO!', VW / 2, VH / 2 - 20, 80, '#2ecc71');
-  } else if (sim.mode == 'roundend') {
-    ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fillRect(0, 0, VW, VH);
-    text(sim.winner == pi ? 'ROUND WON' : 'ROUND LOST', VW / 2, VH / 2, 40, sim.winner == pi ? '#2ecc71' : '#ff5252');
-  } else if (sim.mode == 'matchend') {
-    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 0, VW, VH);
-    text(sim.winner == pi ? 'VICTORY' : 'DEFEAT', VW / 2, VH / 2, 54, sim.winner == pi ? '#2ecc71' : '#ff5252');
-    text(n == 2 ? p.score + ' - ' + DP[1 - pi].score : p.score + ' rounds won', VW / 2, VH / 2 + 40, 26, '#fff');
+  } else if (sim.mode == 'roundend' || sim.mode == 'matchend') {
+    // Only a banner here, up near the top: screens.js draws the results card (who won and why) over the whole canvas.
+    var endWon = sim.winner == pi, endTxt, endSz;
+    if (sim.mode == 'matchend') { endTxt = endWon ? 'VICTORY' : 'DEFEAT'; endSz = 36; }
+    else { endTxt = endWon ? 'ROUND WON' : 'ROUND LOST'; endSz = 30; }
+    ctx.fillStyle = 'rgba(0,0,0,' + (sim.mode == 'matchend' ? 0.6 : 0.45) + ')'; ctx.fillRect(0, 0, VW, VH);   // dim this view; the banner goes on top of the dim
+    var endW = endTxt.length * endSz * 0.6 + 40;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(VW / 2 - endW / 2, 95 - endSz + 2, endW, endSz + 14);
+    ctx.fillStyle = endWon ? '#2ecc71' : '#ff5252'; ctx.fillRect(VW / 2 - endW / 2, 95 - endSz + 2, endW, 3);
+    text(endTxt, VW / 2, 95, endSz, endWon ? '#2ecc71' : '#ff5252');
   }
   ctx.restore();
 }
