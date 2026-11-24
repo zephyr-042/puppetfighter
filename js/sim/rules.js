@@ -40,11 +40,11 @@ function collide(s) {
   for (i = 0; i < n; i++) {
     for (j = i + 1; j < n; j++) {
       a = s.p[i]; b = s.p[j];
-      if (!(a.y < b.y + 72 && b.y < a.y + 72)) continue;   // bodies are 72 tall: no contact unless they overlap vertically
+      if (!(a.y < b.y + 82 && b.y < a.y + 82)) continue;   // bodies are 72 tall; 82 = a little forgiving: no contact unless they overlap vertically
       dx = b.x - a.x; dz = b.z - a.z; d = hyp(dx, dz);
-      if (d < 34 && d > 0.001) {                          // 34 = generous tag reach, bodies only push apart inside 28
+      if (d < 44 && d > 0.001) {                          // 44 = tag reach, bodies only push apart inside 30
         nx = dx / d; nz = dz / d;
-        if (d < 28) { ov = (28 - d) / 2; a.x -= nx * ov; a.z -= nz * ov; b.x += nx * ov; b.z += nz * ov; }
+        if (d < 30) { ov = (30 - d) / 2; a.x -= nx * ov; a.z -= nz * ov; b.x += nx * ov; b.z += nz * ov; }
         if (!a.isIt && !b.isIt) {                         // two runners: only exactly one fast slider trips the other
           if (tripper(a) && !tripper(b) && b.stun <= 0) doTrip(s, i, j);
           else if (tripper(b) && !tripper(a) && a.stun <= 0) doTrip(s, j, i);
