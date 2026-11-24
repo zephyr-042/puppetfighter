@@ -1,4 +1,8 @@
-  body { margin: 0; background: #000; color: #888; font-family: monospace; text-align: center; }
-  canvas { display: block; margin: 4px auto 0; background: #111; border: 2px solid #444; }
+body { margin: 0; background: #000; color: #888; font-family: monospace; text-align: center; }
+  canvas { display: block; margin: 4px auto 0; background: #111; border: 2px solid #444; box-sizing: border-box; }
   p { margin: 6px; font-size: 12px; }
   #ui { padding: 1px 0; }
+  /* in a match, or in fullscreen: no info panel, the canvas (fit() in main.js sizes it, 2:1) is centred in the whole window */
+  body.game { height: 100vh; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+  body.game #ui { display: none; }
+  body.game canvas { margin: 0; border: 0; flex: none; }
