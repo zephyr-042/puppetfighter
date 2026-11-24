@@ -9,18 +9,44 @@ simToTitle(sim);
 
 // the canvas keeps its internal 960x480 and is scaled to the window; the info panel is only shown
 // on the title screen so the game itself gets the whole window
-var uiEl = document.getElementById('ui'), uiShown = true;
+var uiEl = document.getElementById('ui'), gameMode = false;
+// fullscreen: the API (button / F11 key) or the browser's own F11 (not reported by the API, so compare the window to the screen)
+function isFull() {
+  var d = document;
+  return !!(d.fullscreenElement || d.webkitFullscreenElement) ||
+         (window.screen && window.innerHeight >= screen.height - 1 && window.innerWidth >= screen.width - 1);
+}
+function toggleFull() {
+  var d = document, e = d.documentElement, r;
+  try {
+    if (d.fullscreenElement || d.webkitFullscreenElement) (d.exitFullscreen || d.webkitExitFullscreen).call(d);
+    else if (e.requestFullscreen || e.webkitRequestFullscreen) {
+      r = (e.requestFullscreen || e.webkitRequestFullscreen).call(e);
+      if (r && r.catch) r.catch(function () {});
+    }
+  } catch (err) {}
+}
+// during a match or in fullscreen the info panel (#ui) is hidden (css: body.game) and the canvas takes the whole
+// window at 2:1, centred. On the title screen in a normal window it leaves room for the panel below
 function fit() {
-  var h = uiShown ? uiEl.offsetHeight : 0;
-  var w = Math.max(320, Math.min(window.innerWidth - 12, (window.innerHeight - h - 16) * 2));
+  var w;
+  gameMode = sim.mode != 'title' || isFull();
+  document.body.className = gameMode ? 'game' : '';
+  if (gameMode) w = Math.max(160, Math.floor(Math.min(window.innerWidth, window.innerHeight * 2) / 2) * 2);
+  else w = Math.max(320, Math.min(window.innerWidth - 12, (window.innerHeight - uiEl.offsetHeight - 16) * 2));
   cv.style.width = w + 'px';
   cv.style.height = (w / 2) + 'px';
 }
 function syncUI() {
-  var show = sim.mode == 'title';
-  if (show != uiShown) { uiShown = show; uiEl.style.display = show ? 'block' : 'none'; fit(); }
+  if ((sim.mode != 'title' || isFull()) != gameMode) fit();
 }
 window.onresize = fit;
+if (document.addEventListener) {
+  document.addEventListener('fullscreenchange', fit, false);
+  document.addEventListener('webkitfullscreenchange', fit, false);
+}
+var fsBtn = document.getElementById('fsBtn');
+if (fsBtn) fsBtn.onclick = function () { toggleFull(); fsBtn.blur(); };   // blur: Space / Enter must not re-press the button
 fit();
 
 function exitLock() {
@@ -30,6 +56,7 @@ function exitLock() {
 }
 function onPress(k) {
   var i, j, on = Net.mode != 'local';
+  if (k == 122) { toggleFull(); return; }                   // F11 (title screen or match)
   if (k == 27) { paused = false; exitLock(); Input.mx = 0; if (Net.mode == 'client') leaveOnline(); else simToTitle(sim); return; }
   if (sim.mode == 'title') {
     if (k == 67) { sim.cfg.tpv = !sim.cfg.tpv; return; }     // camera is local-only, so guests may toggle it too
@@ -90,7 +117,8 @@ document.onkeydown = function (e) {
   e = e || window.event;
   var k = e.keyCode || e.which;
   if (k == 59) k = 186;
-  if ((k >= 37 && k <= 40) || k == 32 || k == 13 || k == 191 || k == 188 || k == 190 || k == 186 || k == 222) {
+  if ((k >= 37 && k <= 40) || k == 32 || k == 13 || k == 191 || k == 188 || k == 190 || k == 186 || k == 222 ||
+      (k == 122 && document.documentElement.requestFullscreen)) {   // F11: handled by toggleFull so the API reports it
     if (e.preventDefault) e.preventDefault();
   }
   var was = Input.keys[k];
