@@ -1,6 +1,6 @@
 /* ============================================================================
    js/render/screens.js
-   RENDER (3/3): scoreboard, title screen, render() (picks split / solo / online layout), pause overlay.
+   RENDER (3/3): scoreboard, round / match results card, title screen, render() (picks split / solo / online layout), pause overlay.
    Loads after: render/view.js
    ============================================================================ */
 // scoreboard for 3+ players in a real match
@@ -12,6 +12,77 @@ function drawBoard() {
     ctx.fillStyle = sh(COLS[i], 0); ctx.fillRect(W - 134, y - 9, 9, 9);
     text(NAMES[i] + '  ' + p.score + '  ' + p.itT.toFixed(0) + 's' + (p.isIt ? ' IT' : ''), W - 120, y, 12, p.isIt ? '#ff6666' : '#ddd', 'left');
     y += 16;
+  }
+}
+
+// ---------------------------------------------------------------- round / match results card
+// Player indices in finishing order. Round end: lowest IT time first, and on a tie the player who is not IT right now
+// comes first (exactly endRound's rule). Match end: most rounds won first, then the same IT-time order.
+function resultsOrder(fin) {
+  var idx = [], i, w = sim.winner;
+  for (i = 0; i < DP.length; i++) idx.push(i);
+  idx.sort(function (a, b) {
+    var pa = DP[a], pb = DP[b];
+    if (fin && pa.score != pb.score) return pb.score - pa.score;
+    if (Math.abs(pa.itT - pb.itT) > 0.001) return pa.itT - pb.itT;
+    if (pa.isIt != pb.isIt) return pa.isIt ? 1 : -1;
+    return a - b;
+  });
+  // endRound decides who actually won (its 0.001 tie window is not transitive): never show anyone else on top
+  if (w >= 0 && w < idx.length && idx[0] != w) { idx.splice(idx.indexOf(w), 1); idx.unshift(w); }
+  return idx;
+}
+
+function drawResults() {
+  var fin = sim.mode == 'matchend', n = DP.length, order = resultsOrder(fin), i, p, idx, ry, win, tied = false;
+  var PW = 660, ROWH = n > 4 ? 30 : 32, x0 = Math.round((W - PW) / 2), y0 = 112, PH = 104 + n * ROWH + 44, cy = y0 + 104;
+  var me = Net.mode == 'client' ? Net.me : (Net.mode == 'host' ? 0 : -1);          // "YOU" tag, online only
+  // one decimal, unless two neighbours would look equal at one decimal (then the order would look arbitrary)
+  var dec = 1;
+  for (i = 1; i < n; i++) if (DP[order[i]].itT.toFixed(1) == DP[order[i - 1]].itT.toFixed(1) && DP[order[i]].itT != DP[order[i - 1]].itT) dec = 2;
+  if (!fin && n > 1) tied = Math.abs(DP[order[0]].itT - DP[order[1]].itT) <= 0.001;
+
+  // (each view has already dimmed itself, and the banner it drew stays bright)
+  ctx.fillStyle = 'rgba(10,16,28,0.94)'; ctx.fillRect(x0, y0, PW, PH);
+  ctx.strokeStyle = '#3d556e'; ctx.lineWidth = 2; ctx.strokeRect(x0 + 1, y0 + 1, PW - 2, PH - 2);
+  text(fin ? 'FINAL MATCH RESULTS' : 'ROUND ' + sim.round + ' RESULTS', W / 2, y0 + 40, 28, '#fff');
+  text(fin ? 'FIRST TO ' + sim.cfg.wins + ' ROUND WINS  -  LOWEST TIME AS IT WINS A ROUND' : 'LOWEST TIME AS IT WINS THE ROUND', W / 2, y0 + 64, 15, '#f1c40f');
+  // column heads
+  text('RANK', x0 + 22, y0 + 94, 11, '#7f8c8d', 'left');
+  text('PLAYER', x0 + 96, y0 + 94, 11, '#7f8c8d', 'left');
+  text(fin ? 'LAST ROUND IT' : 'IT TIME', x0 + 345, y0 + 94, 11, '#7f8c8d', 'right');
+  text('ROUNDS WON', x0 + 480, y0 + 94, 11, '#7f8c8d', 'right');
+  ctx.fillStyle = '#3d556e'; ctx.fillRect(x0 + 14, y0 + 99, PW - 28, 1);
+
+  for (i = 0; i < n; i++) {
+    idx = order[i]; p = DP[idx]; ry = cy + i * ROWH; win = i == 0;
+    if (win) {
+      ctx.fillStyle = 'rgba(241,196,15,0.22)'; ctx.fillRect(x0 + 10, ry + 2, PW - 20, ROWH - 4);
+      ctx.strokeStyle = '#f1c40f'; ctx.lineWidth = 2; ctx.strokeRect(x0 + 11, ry + 3, PW - 22, ROWH - 6);
+    } else if (i % 2 == 0) { ctx.fillStyle = 'rgba(255,255,255,0.05)'; ctx.fillRect(x0 + 10, ry + 2, PW - 20, ROWH - 4); }
+    var tc = win ? '#ffe27a' : '#dfe6ee';
+    text('#' + (i + 1), x0 + 22, ry + ROWH - 10, 22, tc, 'left');
+    ctx.fillStyle = sh(COLS[idx], 0); ctx.fillRect(x0 + 68, ry + ROWH / 2 - 8, 16, 16);
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)'; ctx.lineWidth = 1; ctx.strokeRect(x0 + 68.5, ry + ROWH / 2 - 7.5, 15, 15);
+    text(NAMES[idx], x0 + 96, ry + ROWH - 10, 20, tc, 'left');
+    if (idx == me) {
+      ctx.fillStyle = '#34495e'; ctx.fillRect(x0 + 140, ry + ROWH / 2 - 8, 42, 16);
+      text('YOU', x0 + 161, ry + ROWH / 2 + 4, 12, '#fff');
+    }
+    text(p.itT.toFixed(dec) + 's', x0 + 345, ry + ROWH - 10, 22, fin ? '#9fb3c8' : tc, 'right');
+    text(p.score + ' / ' + sim.cfg.wins, x0 + 480, ry + ROWH - 10, 20, tc, 'right');
+    if (win) {
+      ctx.fillStyle = fin ? '#f1c40f' : '#2ecc71'; ctx.fillRect(x0 + 506, ry + ROWH / 2 - 10, 132, 20);
+      text(fin ? 'CHAMPION' : '+1 POINT', x0 + 572, ry + ROWH / 2 + 5, 14, '#10161e');
+    }
+  }
+  // footer: what happens next, and (if it applies) why a tie went the way it did
+  var fy = cy + n * ROWH + 18;
+  if (fin) text('SPACE / ENTER  -  BACK TO TITLE', W / 2, fy + 8, 14, '#fff');
+  else {
+    if (tied) { text('TIED AT ' + DP[order[0]].itT.toFixed(dec) + 's  -  NOT BEING IT WHEN TIME RAN OUT BREAKS THE TIE', W / 2, fy, 12, '#f1c40f'); fy += 18; }
+    var left = Math.max(1, Math.ceil(3 - sim.mt));
+    text((DP[sim.winner] && DP[sim.winner].score >= sim.cfg.wins ? 'MATCH RESULTS' : 'NEXT ROUND') + ' IN ' + left, W / 2, fy, 14, '#9fb3c8');
   }
 }
 
@@ -80,8 +151,10 @@ function render() {
     text(secs, W / 2, 34, 34, (secs <= 5 && sim.mode == 'play') ? '#ff5252' : '#fff');
     text('Round ' + sim.round, W / 2, 12, 11, '#7f8c8d');
   }
-  if (!sim.cfg.solo && DP.length > 2) drawBoard();
-  if (sim.cfg.mouse && !Input.locked && !paused && sim.mode != 'matchend') {
+  var ended = sim.mode == 'roundend' || sim.mode == 'matchend';
+  if (ended) drawResults();                                   // the card replaces the small scoreboard
+  else if (!sim.cfg.solo && DP.length > 2) drawBoard();
+  if (sim.cfg.mouse && !Input.locked && !paused && !ended) {
     text(canLock ? 'click to capture mouse' : 'drag the mouse to turn', W / 2, H - 50, 14, '#f1c40f');
   }
   if (paused) {
