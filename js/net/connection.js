@@ -36,6 +36,7 @@ function leaveOnline() {
   Net.channel = null; Net.mode = 'local'; Net.role = 'local'; Net.room = '';
   sim.cfg.online = false; sim.cfg.n = 2;
   netReset();
+  resetNames(false);                                  // back to P1..P6 with your own name at index 0
   setRoomUI(''); netStatus('Local mode is unchanged. Create or join a room to play online.');
   paused = false;
   simToTitle(sim);
@@ -46,6 +47,7 @@ function openOnlineRoom(code, role) {
   code = String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   if (code.length !== 6) { netStatus('Enter a 6-character room code.'); return; }
   netReset();
+  resetNames(role == 'client');                       // a guest learns every name (host included) from the host
   Net.mode = role; Net.role = role; Net.room = code; Net.id = makeRoomCode() + makeRoomCode();
   sim.cfg.solo = false; paused = false;
   if (role == 'host') { sim.cfg.online = true; sim.cfg.n = 1; } else { sim.cfg.online = false; sim.cfg.n = 2; }
@@ -86,6 +88,5 @@ function openOnlineRoom(code, role) {
 document.getElementById('createRoom').onclick = function () { openOnlineRoom(makeRoomCode(), 'host'); };
 document.getElementById('joinRoom').onclick = function () { openOnlineRoom(document.getElementById('roomCode').value, 'client'); };
 document.getElementById('leaveRoom').onclick = leaveOnline;
-document.getElementById('roomCode').onkeydown = function (e) { if ((e.key || '') == 'Enter') document.getElementById('joinRoom').click(); };
+document.getElementById('roomCode').onkeydown = function (e) { if (e && e.stopPropagation) e.stopPropagation(); if ((e.key || '') == 'Enter') document.getElementById('joinRoom').click(); };
 window.addEventListener('beforeunload', sayBye);
-
