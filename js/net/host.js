@@ -21,13 +21,13 @@ function liveCount() {
   return n;
 }
 function hostResetIn(g) { g.q = []; g.hseq = 0; g.used = 0; g.last = { b: 0, t: 0 }; g.rebuf = true; g.starve = 0; }
-function hostJoin(id) {
+function hostJoin(id, name) {
   var g = gById(id), pc;
-  if (g) return;                                    // join requests are resent until the offer arrives
+  if (g) { if (name !== undefined) g.name = cleanName(name); return; }   // join requests are resent until the offer arrives
   if (sim.mode != 'title') { sig(id, 'busy'); return; }
   if (liveCount() >= MAXP - 1) { sig(id, 'full'); return; }
   g = { id: id, idx: -1, pc: null, dc: null, ice: [], relay: false, open: false, dead: false, t0: ts(), seen: ts(),
-        q: [], hseq: 0, used: 0, last: { b: 0, t: 0 }, rebuf: true, starve: 0, pt: 0, ptAt: 0, ping: 0 };
+        q: [], hseq: 0, used: 0, last: { b: 0, t: 0 }, rebuf: true, starve: 0, pt: 0, ptAt: 0, ping: 0, name: cleanName(name) };
   Net.g.push(g);
   if (!window.RTCPeerConnection) return;            // that guest will fall back to the relay
   try {
@@ -44,7 +44,12 @@ function hostJoin(id) {
 }
 function hostSigIn(m) {
   var g;
-  if (m.k == 'join') { hostJoin(m.from); return; }
+  if (m.k == 'join') { hostJoin(m.from, m.name); return; }
+  if (m.k == 'name') {                              // a guest changed its name while in the lobby / match
+    g = gById(m.from);
+    if (g && !g.dead) g.name = cleanName(m.name);
+    return;
+  }
   if (m.k == 'relay') {
     hostJoin(m.from);
     g = gById(m.from);
@@ -96,14 +101,38 @@ function hostSendTo(g, str) {
     Net.channel.send({ type: 'broadcast', event: 'st', payload: { to: g.id, s: str } });
   }
 }
+// display names, host first: [hostName, guest1Name, ...]. A blank guest name becomes 'P' + (player number);
+// duplicates get the player number appended so the scoreboard rows stay distinguishable
+function hostNames() {
+  var out = [], i, k, g, j, nm;
+  for (i = 0; i < sim.p.length; i++) out.push(i == 0 ? (myName || 'P1') : 'P' + (i + 1));
+  for (k = 0; k < Net.g.length; k++) {
+    g = Net.g[k];
+    if (g.idx > 0 && g.idx < out.length && g.name) out[g.idx] = g.name;
+  }
+  for (i = 1; i < out.length; i++) {
+    for (j = 0; j < i; j++) {
+      if (out[j].toLowerCase() == out[i].toLowerCase()) { out[i] = out[i].slice(0, 10) + ' ' + (i + 1); break; }
+    }
+  }
+  return out;
+}
+// the host's own NAMES[] follows the lobby too
+function syncHostNames() {
+  var nm = hostNames(), i;
+  for (i = 0; i < nm.length && i < NAME_DEFAULTS.length; i++) NAMES[i] = nm[i];
+}
 function sendState() {
-  var i, g, o = [], now = ts(), base, live = [];
+  var i, g, o = [], now = ts(), base, live = [], snap, nm, nk;
   for (i = 0; i < Net.g.length; i++) if (Net.g[i].open && !Net.g[i].dead && Net.g[i].idx > 0) live.push(Net.g[i]);
   if (!live.length) { Net.pendingEvents = []; return; }
   for (i = 0; i < sim.p.length; i++) o.push(packP(sim.p[i], PF));
-  base = JSON.stringify({ mode: sim.mode, mt: r2(sim.mt), round: sim.round, tl: r2(sim.timeLeft), tc: r2(sim.tagCd),
-                          w: sim.winner, tm: sim.cfg.time, wn: sim.cfg.wins, mp: sim.cfg.map, pl: sim.cfg.pillars ? 1 : 0,
-                          tk: Net.tk, lob: sim.p.length, ev: Net.pendingEvents, o: o }).slice(1);
+  snap = { mode: sim.mode, mt: r2(sim.mt), round: sim.round, tl: r2(sim.timeLeft), tc: r2(sim.tagCd),
+           w: sim.winner, tm: sim.cfg.time, wn: sim.cfg.wins, mp: sim.cfg.map, pl: sim.cfg.pillars ? 1 : 0,
+           tk: Net.tk, lob: sim.p.length, ev: Net.pendingEvents, o: o };
+  nm = hostNames(); nk = nm.join('|');                // names: sent when they change, and every 10th snapshot (0.5 s) in case one is lost
+  if (nk !== Net.namesKey || ++Net.nameTick >= 10) { snap.names = nm; Net.namesKey = nk; Net.nameTick = 0; }
+  base = JSON.stringify(snap).slice(1);
   Net.pendingEvents = [];
   for (i = 0; i < live.length; i++) {
     g = live[i];
@@ -132,7 +161,8 @@ function hostMaintain() {
     else if (!g.open && now - g.t0 > 25000) closeG(g);
   }
   if (sim.mode == 'title') lobbySync();
-  else netStatus('Match in progress (' + sim.p.length + ' players).');
+  syncHostNames();
+  if (sim.mode != 'title') netStatus('Match in progress (' + sim.p.length + ' players).');
 }
 function hostStart() {
   var i, g;
@@ -144,4 +174,3 @@ function hostStart() {
   }
   simStartMatch(sim);
 }
-
