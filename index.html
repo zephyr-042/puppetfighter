@@ -10,12 +10,18 @@
 <div id="ui">
 <div id="onlinePanel" style="max-width:960px;margin:10px auto 8px;padding:10px;border:1px solid #34495e;background:#101923;color:#ddd;font:13px monospace;text-align:center">
   <div style="font-size:15px;color:#f1c40f;margin-bottom:8px">ONLINE PLAY (up to 6 players)</div>
-  <button id="createRoom">Create room</button>
-  <span style="padding:0 8px;color:#777">or</span>
-  <input id="roomCode" maxlength="6" placeholder="ROOM CODE" autocomplete="off" style="width:110px;text-transform:uppercase;text-align:center;font: bold 15px monospace;padding:5px;background:#080d13;color:#fff;border:1px solid #526579">
-  <button id="joinRoom">Join room</button>
-  <div id="netStatus" style="margin-top:8px;color:#9fb3c8">Local mode is unchanged. Create or join a room to play online.</div>
-  <div id="roomActions" style="margin-top:6px;display:none">Room code: <strong id="roomLabel" style="color:#2ecc71;letter-spacing:2px"></strong> — share this code with your friends. <button id="leaveRoom">Leave room</button></div>
+  <button id="createRoom">Host Public Room</button>
+  <div style="margin:10px 0 4px;color:#7f8c8d;font-size:12px;letter-spacing:1px">OPEN ROOMS</div>
+  <div id="roomList" style="max-width:640px;margin:0 auto;max-height:150px;overflow-y:auto;text-align:left"><div style="padding:8px;text-align:center;color:#7f8c8d">Looking for rooms...</div></div>
+  <div id="netStatus" style="margin-top:8px;color:#9fb3c8">Local mode is unchanged. Host a public room or join one from the list.</div>
+  <div id="roomActions" style="margin-top:6px;display:none">Room code: <strong id="roomLabel" style="color:#2ecc71;letter-spacing:2px"></strong> — hosts are listed in Open Rooms; friends can also use this code. <button id="leaveRoom">Leave room</button></div>
+  <details style="margin-top:8px;font-size:11px;color:#7f8c8d">
+    <summary style="cursor:pointer;display:inline-block">Join by Code</summary>
+    <div style="margin-top:6px">
+      <input id="roomCode" maxlength="6" placeholder="ROOM CODE" autocomplete="off" style="width:110px;text-transform:uppercase;text-align:center;font: bold 15px monospace;padding:5px;background:#080d13;color:#fff;border:1px solid #526579">
+      <button id="joinRoom">Join room</button>
+    </div>
+  </details>
 </div>
 <p>P1: W/S move, Q/E or mouse turn, A/D strafe, F dash, Space jump, Shift slide (hold), C grab pillar (hold), T/G or mouse look up/down</p>
 <p>P2: Up/Down move, Left/Right turn, , / . strafe, Enter dash, / jump, ; slide (hold), ' grab (hold), [ / ] look up/down &nbsp;|&nbsp; P pause, R reset (solo), Esc title, F11 fullscreen</p>
