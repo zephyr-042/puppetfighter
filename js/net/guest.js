@@ -5,8 +5,8 @@
    ============================================================================ */
 // ---------------------------------------------------------------- guest side
 function startGuestJoin() {
-  sig('host', 'join');
-  Net.joinTimer = setInterval(function () { sig('host', 'join'); }, 2000);
+  sig('host', 'join', null, { name: myName });          // the chosen name travels with the join request
+  Net.joinTimer = setInterval(function () { sig('host', 'join', null, { name: myName }); }, 2000);
   Net.relayTimer = setTimeout(function () {
     if (Net.dc && Net.dc.readyState == 'open') return;
     Net.relayOn = true; clearInterval(Net.joinTimer);
@@ -93,6 +93,9 @@ function onSnapshot(inc) {
   else Net.off += (o - Net.off) * 0.02;
   // authoritative state
   simSetN(sim, n);
+  if (inc.names) {                                   // everybody's display names, host first (sanitized again here)
+    for (i = 0; i < inc.names.length && i < NAME_DEFAULTS.length; i++) NAMES[i] = cleanName(inc.names[i]) || NAME_DEFAULTS[i];
+  }
   for (i = 0; i < n; i++) unpackP(sim.p[i], inc.o[i], PF);
   unpackP(sim.p[Net.me], inc.f, FF);
   sim.mode = inc.mode; sim.mt = inc.mt; sim.round = inc.round; sim.timeLeft = inc.tl; sim.tagCd = inc.tc; sim.winner = inc.w;
@@ -172,4 +175,3 @@ function pingText() {
   for (i = 0; i < Net.g.length; i++) if (!Net.g[i].dead && Net.g[i].ping > m) m = Net.g[i].ping;
   return m ? 'worst ping ' + m + ' ms' : 'ping ...';
 }
-
