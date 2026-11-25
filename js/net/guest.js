@@ -42,7 +42,7 @@ function guestSend(str) {
 }
 function guestWatch() {
   if (Net.lastRx && ts() - Net.lastRx > (Net.gotSnap ? DROP_MS : 20000))
-    netFail(Net.gotSnap ? 'Lost connection to the host.' : 'Could not reach the host. Check the room code and try again.');
+    netFail(Net.gotSnap ? 'Lost connection to the host.' : 'Could not reach the host. Check the room and try again.');
 }
 // advance the predicted own player by one tick, mirroring the order used in simStep
 function predStep(ps, inp) {
@@ -96,6 +96,7 @@ function onSnapshot(inc) {
   if (inc.names) {                                   // everybody's display names, host first (sanitized again here)
     for (i = 0; i < inc.names.length && i < NAME_DEFAULTS.length; i++) NAMES[i] = cleanName(inc.names[i]) || NAME_DEFAULTS[i];
   }
+  if (inc.pgs) Net.pings = inc.pgs;                  // everybody's ping to the host (lobby screen)
   for (i = 0; i < n; i++) unpackP(sim.p[i], inc.o[i], PF);
   unpackP(sim.p[Net.me], inc.f, FF);
   sim.mode = inc.mode; sim.mt = inc.mt; sim.round = inc.round; sim.timeLeft = inc.tl; sim.tagCd = inc.tc; sim.winner = inc.w;
