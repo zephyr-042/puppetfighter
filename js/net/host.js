@@ -122,6 +122,16 @@ function syncHostNames() {
   var nm = hostNames(), i;
   for (i = 0; i < nm.length && i < NAME_DEFAULTS.length; i++) NAMES[i] = nm[i];
 }
+// ping per player index for the lobby screen (host = 0, a guest's ping is the round trip it measured itself)
+function hostPings() {
+  var out = [], i, k, g;
+  for (i = 0; i < sim.p.length; i++) out.push(0);
+  for (k = 0; k < Net.g.length; k++) {
+    g = Net.g[k];
+    if (!g.dead && g.open && g.idx > 0 && g.idx < out.length) out[g.idx] = Math.round(g.ping || 0);
+  }
+  return out;
+}
 function sendState() {
   var i, g, o = [], now = ts(), base, live = [], snap, nm, nk;
   for (i = 0; i < Net.g.length; i++) if (Net.g[i].open && !Net.g[i].dead && Net.g[i].idx > 0) live.push(Net.g[i]);
@@ -131,7 +141,7 @@ function sendState() {
            w: sim.winner, tm: sim.cfg.time, wn: sim.cfg.wins, mp: sim.cfg.map, pl: sim.cfg.pillars ? 1 : 0,
            tk: Net.tk, lob: sim.p.length, ev: Net.pendingEvents, o: o };
   nm = hostNames(); nk = nm.join('|');                // names: sent when they change, and every 10th snapshot (0.5 s) in case one is lost
-  if (nk !== Net.namesKey || ++Net.nameTick >= 10) { snap.names = nm; Net.namesKey = nk; Net.nameTick = 0; }
+  if (nk !== Net.namesKey || ++Net.nameTick >= 10) { snap.names = nm; snap.pgs = hostPings(); Net.namesKey = nk; Net.nameTick = 0; }
   base = JSON.stringify(snap).slice(1);
   Net.pendingEvents = [];
   for (i = 0; i < live.length; i++) {
@@ -150,7 +160,7 @@ function lobbySync() {
   sim.cfg.n = 1 + k;
   if (sim.p.length != sim.cfg.n) simToTitle(sim);
   netStatus(k > 0 ? 'Lobby: ' + (k + 1) + ' players connected. Press SPACE to start the match.'
-                  : 'Room ready. Share the code above; waiting for players...');
+                  : 'Room ready and listed in Open Rooms; waiting for players...');
 }
 function hostMaintain() {
   var now = ts(), i, g;
@@ -173,4 +183,5 @@ function hostStart() {
     if (!g.open && !g.dead) { sig(g.id, 'busy'); closeG(g); }
   }
   simStartMatch(sim);
+  if (typeof lobbyAdvertise == 'function') lobbyAdvertise();   // sim.mode left 'title': stop advertising now
 }
