@@ -60,7 +60,7 @@ function unpackP(p, a, F) {
 
 var Net = {
   mode: 'local', role: 'local', me: 1, id: '', channel: null, room: '', status: 'Local mode',
-  tk: 0, ticks: 0, pendingEvents: [], joined: false,
+  tk: 0, ticks: 0, pendingEvents: [], joined: false, namesKey: '', nameTick: 0,
   // host: one record per guest (see hostJoin)
   g: [],
   // guest: connection
@@ -89,13 +89,18 @@ function netCanSend() {
   return !!c && (c.state === undefined || c.state === 'joined');
 }
 function netReset() {
-  Net.tk = 0; Net.ticks = 0; Net.pendingEvents = []; Net.joined = false; Net.g = [];
+  Net.tk = 0; Net.ticks = 0; Net.pendingEvents = []; Net.joined = false; Net.g = []; Net.namesKey = ''; Net.nameTick = 0;
   Net.pc = null; Net.dc = null; Net.ice = []; Net.relayOn = false; Net.gotSnap = false; Net.lastRx = 0; Net.ping = 0; Net.me = 1;
   Net.seq = 0; Net.pending = []; Net.pp = null; Net.ps = null; Net.err = { x: 0, z: 0, y: 0 };
   Net.snaps = []; Net.off = null;
 }
-function sig(to, k, d) {
-  if (Net.channel) Net.channel.send({ type: 'broadcast', event: 'sig', payload: { from: Net.id, to: to, k: k, d: d } });
+// extra (optional): more fields for the payload, e.g. { name: 'Bob' } on a join message
+function sig(to, k, d, extra) {
+  var m, x;
+  if (!Net.channel) return;
+  m = { from: Net.id, to: to, k: k, d: d };
+  if (extra) for (x in extra) m[x] = extra[x];
+  Net.channel.send({ type: 'broadcast', event: 'sig', payload: m });
 }
 function sd(d) { return window.RTCSessionDescription ? new RTCSessionDescription(d) : d; }
 function addIce(o, c) {
