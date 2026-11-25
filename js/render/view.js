@@ -118,9 +118,21 @@ function renderView(pi) {
   }
 
   // one ray per column: arena edge first, then pillars and boxes far to near
-  var pillars = sim.pillars, boxes = sim.boxes || NOBOX, hits = [], hi, wallD = [], hq, bb;
+  var hits = [], hi, wallD = [], hq, bb;
   var cx = camX, cz = camZ;                        // ray origin for every column
   if (rect && !facade) { cx = clamp(cx, -rect.hw + 2, rect.hw - 2); cz = clamp(cz, -rect.hd + 2, rect.hd - 2); }
+  // behind-camera culling: keep only pillars / boxes that can be in front of the camera plane
+  var ca = Math.cos(p.a), sa = Math.sin(p.a);
+  var allPillars = sim.pillars, allBoxes = sim.boxes || NOBOX, pillars = [], boxes = [], pl;
+  for (k = 0; k < allPillars.length; k++) {
+    pl = allPillars[k];
+    if ((pl.x - cx) * ca + (pl.z - cz) * sa > -pl.r - 10) pillars.push(pl);
+  }
+  for (k = 0; k < allBoxes.length; k++) {
+    bb = allBoxes[k];
+    if ((bb.x - cx) * ca + (bb.z - cz) * sa > -(bb.hw + bb.hd) - 10) boxes.push(bb);
+  }
+  var colUx = [], colUz = [], colCq = [];          // per-column ray direction and cos(column angle), reused by colLim()
   var NC = pit ? 0 : NCOL, holes = sim.holes || NOBOX;
   // colour of a top face: lighter than the sides, fogged by distance
   function topCol(c, tp) {
@@ -133,6 +145,7 @@ function renderView(pi) {
     var ca2 = Math.cos(a);
     var ang = p.a + a;
     var dx = Math.cos(ang), dz = Math.sin(ang);
+    colUx[i] = dx; colUz[i] = dz; colCq[i] = ca2;
     var tmin, u, alt, wd;
     if (facade) {
       // outside the building: the wall below the roof lip with rows of windows rushing upward
@@ -267,8 +280,7 @@ function renderView(pi) {
   // Camera standing ABOVE a box's footprint (on a roof): the roof slab ends at the ray's exit edge, so a puppet on the
   // ground farther than that edge only shows above the exit edge's screen y (it must not draw through the roof)
   function colLim(ci, dF, fy) {
-    var cs = ci * COLW + COLW / 2 - VW / 2, aa = Math.atan(cs / focal), an = p.a + aa;
-    var ux = Math.cos(an), uz = Math.sin(an), cq = Math.cos(aa), lim = 1e9, kk, o2, ex2, ez2, b2, d3, sq, t3, tp3, tf3, y3, ix, iz, x1, x2, z1, z2, tn, tf, hh;
+    var ux = colUx[ci], uz = colUz[ci], cq = colCq[ci], lim = 1e9, kk, o2, ex2, ez2, b2, d3, sq, t3, tp3, tf3, y3, ix, iz, x1, x2, z1, z2, tn, tf, hh, mx, mz, dF2 = dF * dF, cq2 = cq * cq;
     if (wallD[ci] < dF) return -1e9;
     for (kk = 0; kk < pillars.length; kk++) {
       o2 = pillars[kk];
@@ -287,6 +299,9 @@ function renderView(pi) {
     for (kk = 0; kk < boxes.length; kk++) {
       o2 = boxes[kk];
       if (eye > o2.h && fy >= o2.h - 2) continue;              // standing on top of this box: it cannot hide you
+      mx = Math.abs(cx - o2.x) - o2.hw; mz = Math.abs(cz - o2.z) - o2.hd;   // nearest point of the box: if even its depth is past the sprite it cannot occlude it
+      if (mx < 0) mx = 0; if (mz < 0) mz = 0;
+      if ((mx * mx + mz * mz) * cq2 > dF2) continue;
       ix = Math.abs(ux) < 1e-6 ? 1e-6 : ux; iz = Math.abs(uz) < 1e-6 ? 1e-6 : uz;
       x1 = (o2.x - o2.hw - cx) / ix; x2 = (o2.x + o2.hw - cx) / ix; z1 = (o2.z - o2.hd - cz) / iz; z2 = (o2.z + o2.hd - cz) / iz;
       tn = Math.max(Math.min(x1, x2), Math.min(z1, z2)); tf = Math.min(Math.max(x1, x2), Math.max(z1, z2));
@@ -303,7 +318,6 @@ function renderView(pi) {
   }
 
   // opponent sprites, far to near. Low obstacles (crates, steps) hide only the part of a puppet behind them
-  var ca = Math.cos(p.a), sa = Math.sin(p.a);
   var opps = [], oj, oo, ddx, ddz, nearest = null, offs = [];
   for (oj = 0; oj < n; oj++) {
     if (oj == pi && !tpv) continue;                // third person: your own puppet is drawn too
