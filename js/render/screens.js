@@ -126,10 +126,68 @@ function drawTitle() {
   ctx.globalAlpha = 1;
 }
 
+// ---------------------------------------------------------------- online pre-game lobby (replaces the split-screen keybind title)
+function lobbyPing(i) {
+  var k, g;
+  if (Net.mode == 'client') {
+    if (i == Net.me) return Net.ping ? Math.round(Net.ping) : -1;
+    return Net.pings && i < Net.pings.length ? (Net.pings[i] || -1) : -1;
+  }
+  for (k = 0; k < Net.g.length; k++) { g = Net.g[k]; if (!g.dead && g.open && g.idx == i) return g.ping ? Math.round(g.ping) : -1; }
+  return -1;
+}
+function drawOnlineLobby() {
+  var host = Net.mode == 'host', got = host || Net.gotSnap, n = got ? sim.p.length : 0, me = host ? 0 : Net.me;
+  var hn = host ? (myName || 'Host') : (got ? NAMES[0] : 'Host');
+  var PW = 700, x0 = Math.round((W - PW) / 2), y0 = 118, RH = 42, i, ry, on, ms, pc, sx;
+  var g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0a1020'); g.addColorStop(1, '#2a3f58');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // header
+  text(hn + "'s Lobby", W / 2, 50, 34, '#fff');
+  text('ONLINE  -  ' + n + ' / ' + MAXP + ' PLAYERS' + (Net.room ? '  -  ROOM CODE ' + Net.room : ''), W / 2, 74, 14, '#9fb3c8');
+  // settings (only the host can change them)
+  var hc = host ? '#f1c40f' : '#9fb3c8';
+  text((host ? '[V] ' : '') + 'MAP: ' + MAPDEFS[sim.cfg.map].name, 250, 104, 15, hc);
+  text((host ? '[T] ' : '') + 'ROUND TIME: ' + sim.cfg.time + 's', W / 2, 104, 15, hc);
+  text((host ? '[M] ' : '') + 'FIRST TO: ' + sim.cfg.wins + ' WINS', 710, 104, 15, hc);
+  // six player slots
+  for (i = 0; i < MAXP; i++) {
+    ry = y0 + i * RH; on = i < n;
+    ctx.fillStyle = on ? 'rgba(20,32,46,0.92)' : 'rgba(255,255,255,0.04)'; ctx.fillRect(x0, ry, PW, RH - 6);
+    ctx.strokeStyle = on ? (i == me ? '#2ecc71' : '#3d556e') : 'rgba(255,255,255,0.12)'; ctx.lineWidth = i == me && on ? 2 : 1;
+    ctx.strokeRect(x0 + 0.5, ry + 0.5, PW - 1, RH - 7);
+    text(String(i + 1), x0 + 22, ry + 26, 20, on ? '#fff' : '#4a5a6a');
+    if (!on) {
+      ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fillRect(x0 + 44, ry + 8, 22, 22);
+      text('Waiting for player...', x0 + 84, ry + 26, 16, '#566676', 'left');
+      continue;
+    }
+    ctx.fillStyle = sh(COLS[i], 0); ctx.fillRect(x0 + 44, ry + 8, 22, 22);
+    ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 1; ctx.strokeRect(x0 + 44.5, ry + 8.5, 21, 21);
+    text(NAMES[i], x0 + 84, ry + 27, 20, '#fff', 'left');
+    sx = x0 + 300;
+    if (i == 0) { ctx.fillStyle = '#f1c40f'; ctx.fillRect(sx, ry + 10, 50, 18); text('HOST', sx + 25, ry + 24, 13, '#10161e'); sx += 58; }
+    if (i == me) { ctx.fillStyle = '#2ecc71'; ctx.fillRect(sx, ry + 10, 42, 18); text('YOU', sx + 21, ry + 24, 13, '#10161e'); }
+    ms = i == 0 ? -2 : lobbyPing(i);
+    pc = ms < 0 ? '#7f8c8d' : (ms < 60 ? '#2ecc71' : (ms < 120 ? '#f1c40f' : '#e74c3c'));
+    text(ms == -2 ? 'host' : (ms < 0 ? '... ms' : ms + ' ms'), x0 + PW - 20, ry + 26, 16, pc, 'right');
+  }
+  // status bar
+  ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, H - 62, W, 62);
+  if (host && n >= 2) {
+    ctx.globalAlpha = 0.6 + 0.4 * Math.sin(clock * 5);
+    text('PRESS SPACE TO START MATCH', W / 2, H - 22, 30, '#2ecc71');
+    ctx.globalAlpha = 1;
+  } else if (host) text('WAITING FOR PLAYERS TO JOIN...', W / 2, H - 22, 26, '#9fb3c8');
+  else if (got) text('CONNECTED! WAITING FOR HOST TO START...', W / 2, H - 22, 26, '#f1c40f');
+  else text('CONNECTING TO HOST...', W / 2, H - 22, 26, '#9fb3c8');
+}
+
 var paused = false;
 var canLock = !!(cv.requestPointerLock || cv.mozRequestPointerLock);
 function render() {
-  if (sim.mode == 'title') { drawTitle(); return; }
+  if (sim.mode == 'title') { if (Net.mode == 'host' || Net.mode == 'client') drawOnlineLobby(); else drawTitle(); return; }
   if (Net.mode == 'host' || Net.mode == 'client') {
     setView(960, userFov);
     renderView(Net.mode == 'client' ? Net.me : 0);
