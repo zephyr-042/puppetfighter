@@ -131,18 +131,18 @@ var canLock = !!(cv.requestPointerLock || cv.mozRequestPointerLock);
 function render() {
   if (sim.mode == 'title') { drawTitle(); return; }
   if (Net.mode == 'host' || Net.mode == 'client') {
-    setView(960, 90);
+    setView(960, userFov);
     renderView(Net.mode == 'client' ? Net.me : 0);
     ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(W / 2 - 150, 0, 300, 22);
     ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(W / 2 - 190, 0, 380, 22);
     text('ONLINE  |  ' + (Net.mode == 'host' ? 'HOST' : 'PLAYER ' + (Net.me + 1)) + '  |  ' + Net.room + '  |  ' + pingText(), W / 2, 16, 13, '#9fb3c8');
   } else if (sim.cfg.solo) {
-    setView(960, 90);
+    setView(960, userFov);
     renderView(0);
     ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(W / 2 - 150, 0, 300, 22);
     text('PRACTICE  -  R reset  -  P pause', W / 2, 16, 13, '#aaa');
   } else {
-    setView(480, 66);
+    setView(480, fovSplit());                      // Math.round(userFov * 0.73): 90 -> 66
     renderView(0);
     renderView(1);
     ctx.fillStyle = '#000'; ctx.fillRect(VW - 2, 0, 4, VH);
